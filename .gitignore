@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+outputs/*/results/*.json
+outputs/*/results/*.csv
+outputs/*/results/*.png
+outputs/*/instances/*.json

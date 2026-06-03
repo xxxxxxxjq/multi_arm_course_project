@@ -13,7 +13,7 @@
 2. 读取 basic_2B3B_time_energy.csv；
 3. 对每一种 counts_code，只在该 counts_code 内部对 seed=0,1,2 取平均；
 4. 输出一个 16 行左右的汇总 CSV；
-5. 设置多组时间-能耗偏好参数 lambda，充分比较不同偏好下推荐二臂还是三臂。
+5. 设置 10 组时间-能耗偏好参数 lambda，比较不同偏好下推荐二臂还是三臂。
 
 核心指标：
     eta_T = (Cmax_2B - Cmax_3B) / Cmax_2B * 100
@@ -55,18 +55,15 @@ DEFAULT_OUTPUT = PROJECT_DIR / "outputs" / "mode_decision" / "mode_decision_summ
 
 VALID_STATUS = {"OPTIMAL", "FEASIBLE", "SUCCESS", "success"}
 
-# 多组时间-能耗偏好参数。
+# 10 组时间-能耗偏好参数。
 # lambda 越小越偏时间，lambda 越大越偏能耗。
-# 0.5、1、2：时间优先；
-# 3、4、5、6：中间权衡；
-# 8、10、12、15、20：能耗越来越重要。
-LAMBDA_VALUES = [0.5, 1, 2, 3, 4, 5, 6, 8, 10, 12, 15, 20]
+# 输出顺序为：只考虑时间 → 多组 lambda 过渡 → 只考虑能耗。
+LAMBDA_VALUES = [0.5, 1, 2, 3, 4, 5, 6, 8, 10, 15]
 
 
 def lambda_label(lam: float) -> str:
     """把 lambda 转成适合 CSV 字段名的短标签。"""
-    text = str(lam).replace(".", "_")
-    return text
+    return str(lam).replace(".", "_")
 
 
 def safe_float(value: Any) -> float:
@@ -227,7 +224,11 @@ def make_summary_row(group_rows: list[dict]) -> dict:
     eta_t_values = [r["eta_T"] for r in group_rows]
     eta_e_values = [r["eta_E"] for r in group_rows]
 
-    finite_lambda_values = [r["lambda_star"] for r in group_rows if not math.isinf(r["lambda_star"])]
+    finite_lambda_values = [
+        r["lambda_star"]
+        for r in group_rows
+        if not math.isinf(r["lambda_star"])
+    ]
 
     mean_cmax_2 = mean(cmax_2_values)
     mean_cmax_3 = mean(cmax_3_values)
@@ -264,15 +265,17 @@ def make_summary_row(group_rows: list[dict]) -> dict:
         "mean_lambda_star": round2(mean_lambda_star),
 
         "recommend_time_only": recommend_time_only(mean_cmax_2, mean_cmax_3),
-        "recommend_energy_only": recommend_energy_only(mean_energy_2, mean_energy_3),
     }
 
-    # 动态加入多组 lambda 的综合收益和推荐结果。
+    # 动态加入 10 组 lambda 的综合收益和推荐结果。
     for lam in LAMBDA_VALUES:
         label = lambda_label(lam)
         score = mean_eta_t - lam * mean_eta_e
         row[f"S_lambda_{label}"] = round2(score)
         row[f"recommend_lambda_{label}"] = recommend_by_score(score)
+
+    # “只考虑能耗”放在最后，作为能耗极限情况。
+    row["recommend_energy_only"] = recommend_energy_only(mean_energy_2, mean_energy_3)
 
     return row
 
@@ -308,7 +311,7 @@ def build_summary_rows(raw_rows: list[dict]) -> tuple[list[dict], int]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Summarize 2B/3B mode decision by counts_code with seed averaging and multiple lambda values."
+        description="Summarize 2B/3B mode decision by counts_code with seed averaging and 10 lambda values."
     )
     parser.add_argument(
         "--input",

@@ -304,8 +304,8 @@ def _compute_goal_targets(instance: Instance, modes_by_task: Dict[int, List[Mode
     time_goal = max(max(min_total_times), ceil(sum(min_total_times) / n_arms))
 
     # energy_goal 是理想最低能耗估计。
-    # 在原有运动能耗基础上，加入系统级固定开销：
-    # 二臂系统计 2 份，三臂系统计 3 份。
+    # mode.energy 已经由 mode_builder.py 计算，包含物块类型相关的负载、保持和协同能耗。
+    # 此处再加入系统级固定开销：二臂系统计 2 份，三臂系统计 3 份。
     # 该开销代表机械臂上电、启动、伺服保持、控制通信等静态/固定消耗。
     system_overhead_energy = int(SYSTEM_OVERHEAD_PER_ARM * len(instance.arms))
     energy_goal = sum(min_energies) + sum(min_initial_energies) + system_overhead_energy
@@ -350,6 +350,7 @@ def _build_model(instance: Instance, modes_by_task: Dict[int, List[Mode]]):
     center_zone_intervals = []
 
     # 空载转移能耗项，最后加到 total_energy 中。
+    # 注意：物块类型相关的负载/保持/协同能耗已经体现在 mode.energy 中。
     transition_energy_terms = []
 
     # 每只机械臂的负载项，包含处理时间和空载转移时间。
@@ -814,7 +815,7 @@ def solve_schedule(instance: Instance, modes_by_task: Dict[int, List[Mode]]) -> 
         "time_goal": data["goals"]["time_goal"],
         "energy_goal": data["goals"]["energy_goal"],
         "balance_goal": data["goals"]["balance_goal"],
-        "energy_model": "总能耗 = 运动能耗 + 系统级固定开销",
+        "energy_model": "总能耗 = 类型相关运动/负载/保持/协同能耗 + 序列转移能耗 + 系统级固定开销",
         "system_overhead_per_arm": int(SYSTEM_OVERHEAD_PER_ARM),
         "system_overhead_energy": int(data["system_overhead_energy"]),
         "d_time_plus": final_solver.Value(data["d_time_plus"]),
@@ -837,7 +838,7 @@ def solve_schedule(instance: Instance, modes_by_task: Dict[int, List[Mode]]) -> 
         status=final_solver.StatusName(final_status),
         final_stage=final_stage,
         fallback_reason=fallback_reason,
-        model_name="考虑序列相关转移时间、任务组级中心区互斥与能耗的多机械臂目标规划模型",
+        model_name="考虑序列相关转移时间、任务组级中心区互斥与类型相关能耗的多机械臂目标规划模型",
         cmax=final_solver.Value(data["cmax"]),
         motion_energy=final_solver.Value(data["motion_energy"]),
         system_overhead_energy=int(data["system_overhead_energy"]),

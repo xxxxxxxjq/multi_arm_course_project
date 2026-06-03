@@ -1,0 +1,11 @@
+﻿lambda,lambda_label,best_counts_code,best_scenario_type,total_tasks,p1,p2,p3,p4,r,actual_best_S,recommendation,mean_eta_T_percent,mean_eta_E_percent
+0.5,0_5,1212,mixed_balanced,6,0.1667,0.3333,0.1667,0.3333,0.75,35.73,recommend_3arm,37.66,3.86
+1,1,1212,mixed_balanced,6,0.1667,0.3333,0.1667,0.3333,0.75,33.8,recommend_3arm,37.66,3.86
+2,2,1212,mixed_balanced,6,0.1667,0.3333,0.1667,0.3333,0.75,29.94,recommend_3arm,37.66,3.86
+3,3,1212,mixed_balanced,6,0.1667,0.3333,0.1667,0.3333,0.75,26.08,recommend_3arm,37.66,3.86
+4,4,1212,mixed_balanced,6,0.1667,0.3333,0.1667,0.3333,0.75,22.22,recommend_3arm,37.66,3.86
+5,5,1212,mixed_balanced,6,0.1667,0.3333,0.1667,0.3333,0.75,18.36,recommend_3arm,37.66,3.86
+6,6,1212,mixed_balanced,6,0.1667,0.3333,0.1667,0.3333,0.75,14.5,recommend_3arm,37.66,3.86
+8,8,1212,mixed_balanced,6,0.1667,0.3333,0.1667,0.3333,0.75,6.78,recommend_3arm,37.66,3.86
+10,10,1212,mixed_balanced,6,0.1667,0.3333,0.1667,0.3333,0.75,-0.94,recommend_2arm,37.66,3.86
+15,15,1212,mixed_balanced,6,0.1667,0.3333,0.1667,0.3333,0.75,-20.24,recommend_2arm,37.66,3.86

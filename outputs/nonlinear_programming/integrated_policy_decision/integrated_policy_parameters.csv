@@ -1,0 +1,7 @@
+﻿parameter,value,meaning
+lambda_values,"0.5,1,2,3,4,5,6,8,10,15",energy penalty weights
+gamma_values,"0,0.5,1,1.5,2",risk-aversion coefficients
+activation_cost_K,"0,2,4,6,8,10,12,15,20,25",fixed activation cost levels of enabling the third arm
+final_score,"S_final=mean(S_lambda)-gamma*std(S_lambda)-K*Phi(p,r)","integrated score combining benefit, uncertainty and fixed activation cost"
+speed_policy,lambda<=2:efficiency_first; 3<=lambda<=6:balanced; lambda>=8:energy_first,speed preference selected according to energy penalty weight
+decision_rule,recommend_3arm if S_final>0 else recommend_2arm,final integrated two-arm / three-arm decision rule

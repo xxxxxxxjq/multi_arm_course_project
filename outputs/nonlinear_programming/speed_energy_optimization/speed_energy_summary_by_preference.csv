@@ -1,0 +1,4 @@
+﻿preference,case_count,base_recommend_3arm_count,base_recommend_2arm_count,optimized_recommend_3arm_count,optimized_recommend_2arm_count,optimized_recommend_3arm_ratio_percent,mean_opt_speed_2arm,mean_opt_speed_3arm,mean_objective_gain_3arm_vs_2arm_percent,note
+efficiency_first,16,16,0,16,0,100.0,1.4,1.23,19.47,positive gain means optimized 3-arm objective is lower than optimized 2-arm objective
+balanced,16,16,0,16,0,100.0,0.89,0.78,17.27,positive gain means optimized 3-arm objective is lower than optimized 2-arm objective
+energy_first,16,16,0,16,0,100.0,0.6,0.6,10.99,positive gain means optimized 3-arm objective is lower than optimized 2-arm objective

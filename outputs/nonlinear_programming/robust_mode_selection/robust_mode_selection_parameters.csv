@@ -1,0 +1,6 @@
+﻿parameter,value,meaning
+lambda_values,"0.5,1,2,3,4,5,6,8,10,15",energy penalty weights
+gamma_values,"0,0.5,1,1.5,2",risk-aversion coefficients for robust optimization
+base_score,S_lambda = eta_T - lambda * eta_E,original mean benefit of enabling the third arm
+robust_score,S_robust = mean(S_lambda) - gamma * std(S_lambda),lower-confidence robust benefit considering random variation
+decision_rule,recommend_3arm if S_robust > 0 else recommend_2arm,robust two-arm / three-arm mode selection rule

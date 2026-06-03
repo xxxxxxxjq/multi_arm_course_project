@@ -201,15 +201,17 @@ def main() -> None:
     out_dir = OUTPUT_DIR / "four_case_framework"
     ensure_dirs(out_dir)
 
+    output_path = out_dir / "basic_2B3B_time_energy.csv"
     rows = []
+    total_runs = len(count_codes) * len(seeds)
+    run_index = 0
 
     for raw_code in count_codes:
         counts_code, counts, counts_text = parse_count_code(raw_code)
         total_tasks = sum(counts.values())
 
         for seed in seeds:
-            print(f"运行 counts={counts_code}, seed={seed}")
-
+            run_index += 1
             result_2b = solve_basic_case(
                 counts_text=counts_text,
                 seed=seed,
@@ -237,8 +239,15 @@ def main() -> None:
                 "cmax_3B_basic": to_float_or_blank(result_3b.get("cmax")),
                 "energy_3B_basic": to_float_or_blank(result_3b.get("total_energy")),
             })
+            save_csv(rows, output_path)
+            print(
+                f"[basic {run_index}/{total_runs}] counts={counts_code}, seed={seed}, "
+                f"tasks={total_tasks}, "
+                f"2B status={result_2b.get('status', '')}, cmax={result_2b.get('cmax', '')}, energy={result_2b.get('total_energy', '')}; "
+                f"3B status={result_3b.get('status', '')}, cmax={result_3b.get('cmax', '')}, energy={result_3b.get('total_energy', '')}",
+                flush=True,
+            )
 
-    output_path = out_dir / "basic_2B3B_time_energy.csv"
     save_csv(rows, output_path)
 
     print("\nCSV 生成完成。")

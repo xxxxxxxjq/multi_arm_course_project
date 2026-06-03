@@ -201,25 +201,49 @@ def main() -> None:
     out_dir = OUTPUT_DIR / "four_case_framework"
     ensure_dirs(out_dir)
 
+    output_path = out_dir / "optimized_2B3B_time_energy.csv"
     rows = []
+    total_runs = len(count_codes) * len(seeds)
+    run_index = 0
 
     for raw_code in count_codes:
         counts_code, counts, counts_text = parse_count_code(raw_code)
         total_tasks = sum(counts.values())
 
         for seed in seeds:
-            print(f"运行 counts={counts_code}, seed={seed}")
+            run_index += 1
+            print(
+                f"\n[batch {run_index}/{total_runs}] counts={counts_code}, "
+                f"seed={seed}, total_tasks={total_tasks}",
+                flush=True,
+            )
 
+            print(f"[batch {run_index}/{total_runs}] start 2B optimized", flush=True)
             result_2b = solve_optimized_case(
                 counts_text=counts_text,
                 seed=seed,
                 arm_count=2,
             )
+            print(
+                f"[batch {run_index}/{total_runs}] finish 2B: "
+                f"status={result_2b.get('status', '')}, "
+                f"cmax={result_2b.get('cmax', '')}, "
+                f"energy={result_2b.get('total_energy', '')}",
+                flush=True,
+            )
 
+            print(f"[batch {run_index}/{total_runs}] start 3B optimized", flush=True)
             result_3b = solve_optimized_case(
                 counts_text=counts_text,
                 seed=seed,
                 arm_count=3,
+            )
+            print(
+                f"[batch {run_index}/{total_runs}] finish 3B: "
+                f"status={result_3b.get('status', '')}, "
+                f"cmax={result_3b.get('cmax', '')}, "
+                f"energy={result_3b.get('total_energy', '')}",
+                flush=True,
             )
 
             rows.append({
@@ -237,8 +261,9 @@ def main() -> None:
                 "cmax_3B_optimized": to_float_or_blank(result_3b.get("cmax")),
                 "energy_3B_optimized": to_float_or_blank(result_3b.get("total_energy")),
             })
+            save_csv(rows, output_path)
+            print(f"[batch {run_index}/{total_runs}] saved partial CSV: {output_path}", flush=True)
 
-    output_path = out_dir / "optimized_2B3B_time_energy.csv"
     save_csv(rows, output_path)
 
     print("\nCSV 生成完成。")

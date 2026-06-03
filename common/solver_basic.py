@@ -38,6 +38,7 @@ from common.config import (
     ENFORCE_CENTER_ZONE_EXCLUSION,
     NUM_WORKERS,
     SOLVER_TIME_LIMIT,
+    SYSTEM_OVERHEAD_PER_ARM,
     TIME_SCALE,
     USE_CENTER_ZONE,
     V_EMPTY,
@@ -295,7 +296,11 @@ def _compute_goal_targets(instance: Instance, modes_by_task: Dict[int, List[Mode
     time_goal = max(max(min_total_times), ceil(sum(min_total_times) / n_arms))
 
     # energy_goal 是理想最低能耗估计。
-    energy_goal = sum(min_energies) + sum(min_initial_energies)
+    # 在原有运动能耗基础上，加入系统级固定开销：
+    # 二臂系统计 2 份，三臂系统计 3 份。
+    # 该开销代表机械臂上电、启动、伺服保持、控制通信等静态/固定消耗。
+    system_overhead_energy = int(SYSTEM_OVERHEAD_PER_ARM * len(instance.arms))
+    energy_goal = sum(min_energies) + sum(min_initial_energies) + system_overhead_energy
 
     # balance_goal=0 表示理想情况下多臂负载完全相等。
     balance_goal = 0
@@ -519,15 +524,26 @@ def _build_model(instance: Instance, modes_by_task: Dict[int, List[Mode]]):
         for mode in modes:
             model.Add(cmax >= all_ends[mode.mode_id]).OnlyEnforceIf(all_presences[mode.mode_id])
 
-    # 总能耗 = 处理能耗 + 空载转移能耗。
+    # 运动能耗 = 处理能耗 + 空载转移能耗。
+    # 系统总能耗 = 运动能耗 + 系统级固定开销。
+    #
+    # 为什么要加入系统级固定开销？
+    # 原始运动能耗只反映任务路径和搬运动作。三臂系统由于多了一只机械臂，
+    # 即使路径更短，也会产生额外的启动、上电、伺服保持和控制通信消耗。
+    # 因此这里按启用机械臂数量加入固定能耗项，使能耗定义更接近实际系统。
     process_energy_terms = []
     for modes in modes_by_task.values():
         for mode in modes:
             p = all_presences[mode.mode_id]
             process_energy_terms.append(mode.energy * p)
 
+    motion_energy = model.NewIntVar(0, 10**9, "motion_energy")
+    model.Add(motion_energy == sum(process_energy_terms + transition_energy_terms))
+
+    system_overhead_energy = int(SYSTEM_OVERHEAD_PER_ARM * len(instance.arms))
+
     total_energy = model.NewIntVar(0, 10**9, "total_energy")
-    model.Add(total_energy == sum(process_energy_terms + transition_energy_terms))
+    model.Add(total_energy == motion_energy + system_overhead_energy)
 
     # 每只机械臂的负载 = 处理时间 + 空载转移时间。
     arm_load_vars = {}
@@ -569,6 +585,8 @@ def _build_model(instance: Instance, modes_by_task: Dict[int, List[Mode]]):
         "starts": all_starts,
         "ends": all_ends,
         "cmax": cmax,
+        "motion_energy": motion_energy,
+        "system_overhead_energy": system_overhead_energy,
         "total_energy": total_energy,
         "arm_loads": arm_load_vars,
         "load_imbalance": load_imbalance,
@@ -716,6 +734,9 @@ def solve_schedule(instance: Instance, modes_by_task: Dict[int, List[Mode]]) -> 
         "time_goal": data["goals"]["time_goal"],
         "energy_goal": data["goals"]["energy_goal"],
         "balance_goal": data["goals"]["balance_goal"],
+        "energy_model": "总能耗 = 运动能耗 + 系统级固定开销",
+        "system_overhead_per_arm": int(SYSTEM_OVERHEAD_PER_ARM),
+        "system_overhead_energy": int(data["system_overhead_energy"]),
         "d_time_plus": final_solver.Value(data["d_time_plus"]),
         "d_time_minus": final_solver.Value(data["d_time_minus"]),
         "d_energy_plus": final_solver.Value(data["d_energy_plus"]),
@@ -732,6 +753,8 @@ def solve_schedule(instance: Instance, modes_by_task: Dict[int, List[Mode]]) -> 
         status=final_solver.StatusName(final_status),
         model_name="考虑序列相关转移时间、任务组级中心区互斥与能耗的多机械臂目标规划模型",
         cmax=final_solver.Value(data["cmax"]),
+        motion_energy=final_solver.Value(data["motion_energy"]),
+        system_overhead_energy=int(data["system_overhead_energy"]),
         total_energy=final_solver.Value(data["total_energy"]),
         load_imbalance=final_solver.Value(data["load_imbalance"]),
         arm_loads={k: final_solver.Value(v) for k, v in data["arm_loads"].items()},

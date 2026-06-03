@@ -9,13 +9,14 @@
 1. 每个任务必须且只能选择一种执行模式；
 2. 同一只机械臂同一时间不能执行两个任务；
 3. 任务前的空载转移时间和能耗取决于任务顺序；
-4. 如果路径经过中心危险区，需要对中心区加互斥约束；
+4. 如果任务组经过中心安全区，则对不同任务组加中心区互斥约束；
 5. 采用序贯目标规划：先时间，再能耗，再负载均衡。
 
 重要理解：
 - 这不是机械臂底层控制代码，不会求真实关节轨迹；
 - 它是上层“运筹学调度模型”；
-- 输出结果告诉你：任务由谁做、什么时候开始、什么时候结束、顺序如何。
+- 输出结果告诉你：任务由谁做、什么时候开始、什么时候结束、顺序如何；
+- 中心区约束按“任务组级”处理：双臂协同任务内部两只机械臂允许同时进入中心区，但不同任务组不能同时占用中心区。
 """
 
 from __future__ import annotations
@@ -379,25 +380,27 @@ def _build_model(instance: Instance, modes_by_task: Dict[int, List[Mode]]):
                 arm_intervals[arm_name].append(interval)
                 load_terms[arm_name].append(mode.duration * p)
 
-            # 如果启用中心区硬互斥，才添加局部占用窗口。
-            # 默认关闭硬互斥：因为本工程展示的是静态建模，任务完全可以排队完成；
-            # 把中心区当成硬约束会导致随机实例被过度限制，从而频繁“无可行解”。
+            # 中心安全区互斥约束：采用“任务组级”资源建模。
+            #
+            # 关键点：中心区不是“单个机械臂只能进一个”的资源，而是
+            # “同一时刻最多允许一个任务组占用”的共享安全资源。
+            # 因此，对于 Type3/Type4 这类双臂协同任务，参与同一任务的两只机械臂
+            # 可以同时进入中心区；但其他任务组必须等待该任务组释放中心区后才能进入。
+            #
+            # 第一版采用保守处理：只要 mode 的 loaded path 经过中心区，就把整个任务处理段
+            # [start, end] 视为占用中心区。这样比精细的“进入/离开中心区时间窗”更保守，
+            # 但不会把同一个双臂协同任务内部的两只机械臂错误地判为冲突。
             if ENFORCE_CENTER_ZONE_EXCLUSION and mode.uses_center_zone:
-                loaded_ticks = _loaded_travel_ticks(task, mode)
-                win = _segment_center_window(task.pos, task.target_pos, loaded_ticks)
-                if win is not None:
-                    offset, duration = win
-                    safe_name = mode.mode_id.replace("+", "_")
-                    _add_center_window_after_start(
-                        model,
-                        horizon,
-                        center_zone_intervals,
+                safe_name = mode.mode_id.replace("+", "_")
+                center_zone_intervals.append(
+                    model.NewOptionalIntervalVar(
                         s,
+                        mode.duration,
+                        e,
                         p,
-                        offset,
-                        duration,
-                        f"process_{safe_name}",
+                        f"center_task_group_{safe_name}",
                     )
+                )
 
         # 每个任务必须选择且只能选择一个模式。
         model.AddExactlyOne(presences_for_task)
@@ -454,21 +457,10 @@ def _build_model(instance: Instance, modes_by_task: Dict[int, List[Mode]]):
             load_terms[arm_name].append(setup * first_arc)
             incoming_setup_info.setdefault((arm_name, mode.mode_id), []).append((first_arc, setup, "standby", "depot"))
 
-            # 默认不把 setup 穿越中心区作为硬互斥约束，只在结果中保留 uses_center_zone 标记。
-            win = _segment_center_window(arm.pos, task.pos, setup) if ENFORCE_CENTER_ZONE_EXCLUSION else None
-            if setup > 0 and win is not None:
-                offset, duration = win
-                _add_center_window_before_end(
-                    model,
-                    horizon,
-                    center_zone_intervals,
-                    all_starts[mode.mode_id],
-                    first_arc,
-                    setup,
-                    offset,
-                    duration,
-                    f"{arm_name}_depot_to_{mode.mode_id}",
-                )
+            # 不再对初始 setup 段单独添加中心区互斥 interval。
+            # 原因：双臂协同任务可能需要两只机械臂同时从不同方向接近中心区，
+            # 如果按“机械臂级 setup 段”互斥，会把同一任务组内部的两只机械臂误判为冲突。
+            # 当前中心区约束统一在任务处理段上按“任务组级”建模。
 
         # task i -> task j：如果当前机械臂先做 pred，再做 succ，就加入序列相关 setup。
         for pred in modes_for_arm:
@@ -499,21 +491,9 @@ def _build_model(instance: Instance, modes_by_task: Dict[int, List[Mode]]):
                 load_terms[arm_name].append(setup * arc)
                 incoming_setup_info.setdefault((arm_name, succ.mode_id), []).append((arc, setup, pred.mode_id, "mode"))
 
-                # 默认不把后续空载转移穿越中心区作为硬互斥约束。
-                win = _segment_center_window(pred_task.target_pos, succ_task.pos, setup) if ENFORCE_CENTER_ZONE_EXCLUSION else None
-                if setup > 0 and win is not None:
-                    offset, duration = win
-                    _add_center_window_before_end(
-                        model,
-                        horizon,
-                        center_zone_intervals,
-                        all_starts[succ.mode_id],
-                        arc,
-                        setup,
-                        offset,
-                        duration,
-                        f"{arm_name}_{pred.mode_id}_to_{succ.mode_id}",
-                    )
+                # 不再对后续空载 setup 段单独添加中心区互斥 interval。
+                # 当前中心区约束统一在任务处理段上按“任务组级”建模，
+                # 避免同一个双臂协同任务的两只机械臂在进入中心区时互相冲突。
 
         # AddCircuit 负责保证当前机械臂形成一条合法任务序列。
         model.AddCircuit(arcs)
@@ -523,9 +503,9 @@ def _build_model(instance: Instance, modes_by_task: Dict[int, List[Mode]]):
         if intervals:
             model.AddNoOverlap(intervals)
 
-    # 中心危险区 NoOverlap：默认关闭。
-    # 原因：随机实例中，两臂在双臂任务前可能需要先后经过中心区并等待；
-    # 若把所有中心区窗口强行绑定到任务开始时刻，会把大量本可排队完成的情况误判为不可行。
+    # 中心安全区 NoOverlap：任务组级共享资源。
+    # 含义：不同任务组不能同时占用中心区；
+    # 但同一个双臂协同任务内部的两只机械臂允许同时进入中心区。
     if ENFORCE_CENTER_ZONE_EXCLUSION and center_zone_intervals:
         model.AddNoOverlap(center_zone_intervals)
 
@@ -750,7 +730,7 @@ def solve_schedule(instance: Instance, modes_by_task: Dict[int, List[Mode]]) -> 
     # 最终返回的 result 是整个工程后续保存/画图/打印的统一数据源。
     result = ScheduleResult(
         status=final_solver.StatusName(final_status),
-        model_name="考虑序列相关转移时间、中心区路径标记与能耗的多机械臂目标规划模型",
+        model_name="考虑序列相关转移时间、任务组级中心区互斥与能耗的多机械臂目标规划模型",
         cmax=final_solver.Value(data["cmax"]),
         total_energy=final_solver.Value(data["total_energy"]),
         load_imbalance=final_solver.Value(data["load_imbalance"]),

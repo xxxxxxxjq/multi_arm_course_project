@@ -107,8 +107,6 @@ def run_scenario(
     for attempt in range(1, attempts + 1):
         actual_seed = make_seed(seed)
         try:
-            print(f"\n========== {scenario_name}：第 {attempt}/{attempts} 次生成并求解 ==========")
-            print(f"本次随机种子 = {actual_seed}")
             block_types = counts_to_block_types(counts)
             instance = generate_instance(seed=actual_seed, block_types=block_types, arm_count=arm_count)
             modes = build_modes(instance)
@@ -116,7 +114,6 @@ def run_scenario(
             break
         except Exception as exc:  # noqa: BLE001
             last_error = exc
-            print(f"本次实例不可行或求解失败：{exc}")
             if seed is not None:
                 raise
     else:

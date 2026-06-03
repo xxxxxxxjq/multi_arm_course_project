@@ -56,6 +56,14 @@ class ScheduleResult(dict):
     """
 
 
+# 第三阶段是最低优先级目标：负载均衡。
+# 为避免批量实验因为第三阶段在时间限制内找不到解而中断，
+# 第三阶段允许在第二阶段最优能耗附近有少量容差。
+# 如果第三阶段仍未找到可行解，则回退到第二阶段结果。
+STAGE3_ENERGY_TOLERANCE = 10
+STAGE3_D_ENERGY_TOLERANCE = 10
+
+
 def _to_ticks(seconds: float) -> int:
     """把秒转换为整数 tick。"""
     return max(1, int(round(seconds * TIME_SCALE)))
@@ -609,10 +617,49 @@ def _new_solver() -> cp_model.CpSolver:
     return solver
 
 
+def _is_good_status(status: int) -> bool:
+    """判断求解器是否给出了可用解。"""
+    return status in (cp_model.OPTIMAL, cp_model.FEASIBLE)
+
+
 def _check_status(status: int, message: str) -> None:
-    """检查求解状态，不可行时抛出错误。"""
-    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+    """检查求解状态，不可行时抛出错误。
+
+    第一阶段必须找到可行解，因为它代表任务本身在当前约束下是否能完成。
+    第二、第三阶段属于更高要求的目标规划优化，后面会采用回退策略。
+    """
+    if not _is_good_status(status):
         raise RuntimeError(message)
+
+
+def _add_solution_hint(model: cp_model.CpModel, data: dict, solver: cp_model.CpSolver) -> None:
+    """把上一阶段的解作为下一阶段提示。
+
+    CP-SAT 第三阶段有时并不是真的无解，而是在时间限制内没有重新找到
+    同时满足前两级目标的解。把第二阶段解作为 hint，可以帮助第三阶段
+    更快找到可行起点。
+    """
+    hinted = []
+    hinted.extend(data["presence"].values())
+    hinted.extend(data["starts"].values())
+    hinted.extend(data["ends"].values())
+    hinted.append(data["cmax"])
+    hinted.append(data["motion_energy"])
+    hinted.append(data["total_energy"])
+    hinted.extend(data["arm_loads"].values())
+    hinted.append(data["load_imbalance"])
+    hinted.append(data["d_time_plus"])
+    hinted.append(data["d_time_minus"])
+    hinted.append(data["d_energy_plus"])
+    hinted.append(data["d_energy_minus"])
+    hinted.append(data["d_balance_plus"])
+    hinted.append(data["d_balance_minus"])
+
+    for var in hinted:
+        try:
+            model.AddHint(var, solver.Value(var))
+        except Exception:
+            pass
 
 
 def solve_schedule(instance: Instance, modes_by_task: Dict[int, List[Mode]]) -> ScheduleResult:
@@ -642,24 +689,57 @@ def solve_schedule(instance: Instance, modes_by_task: Dict[int, List[Mode]]) -> 
     model.Add(data["d_time_plus"] == best_d1)
     model.Add(data["cmax"] == best_cmax)
     model.Minimize(data["d_energy_plus"] * 100000 + data["total_energy"])
+    _add_solution_hint(model, data, solver1)
     solver2 = _new_solver()
     status2 = solver2.Solve(model)
-    _check_status(status2, "基础方法 第二阶段未找到可行解。")
-    best_d2 = solver2.Value(data["d_energy_plus"])
-    best_energy = solver2.Value(data["total_energy"])
+
+    # 第二阶段理论上至少可以沿用第一阶段解，但在复杂场景下可能因时间限制返回 UNKNOWN。
+    # 为了避免批量实验中断，如果第二阶段未找到可用解，则回退到第一阶段结果。
+    if _is_good_status(status2):
+        best_d2 = solver2.Value(data["d_energy_plus"])
+        best_energy = solver2.Value(data["total_energy"])
+        stage2_used = True
+    else:
+        best_d2 = solver1.Value(data["d_energy_plus"])
+        best_energy = solver1.Value(data["total_energy"])
+        stage2_used = False
 
     # ------------------------------
-    # 第三阶段：固定时间和能耗结果，再优化负载均衡
+    # 第三阶段：在不破坏前两级主要目标的前提下优化负载均衡
     # ------------------------------
-    model.Add(data["d_energy_plus"] == best_d2)
-    model.Add(data["total_energy"] == best_energy)
-    model.Minimize(data["d_balance_plus"] * 100000 + data["load_imbalance"])
-    solver3 = _new_solver()
-    status3 = solver3.Solve(model)
-    _check_status(status3, "基础方法 第三阶段未找到可行解。")
+    # 这里不再用完全等式硬卡死第二阶段能耗，而是允许极小容差。
+    # 这样更符合工程求解：第三阶段是最低优先级目标，不能因为它搜索困难
+    # 就否定前两阶段已经得到的可行调度。
+    if stage2_used:
+        model.Add(data["d_energy_plus"] <= best_d2 + STAGE3_D_ENERGY_TOLERANCE)
+        model.Add(data["total_energy"] <= best_energy + STAGE3_ENERGY_TOLERANCE)
+        model.Minimize(data["d_balance_plus"] * 100000 + data["load_imbalance"])
+        _add_solution_hint(model, data, solver2)
+        solver3 = _new_solver()
+        status3 = solver3.Solve(model)
+    else:
+        solver3 = None
+        status3 = cp_model.UNKNOWN
 
-    final_solver = solver3
-    final_status = status3
+    # 回退策略：
+    # - 第三阶段成功：采用第三阶段结果；
+    # - 第三阶段失败：采用第二阶段结果；
+    # - 第二阶段也失败：采用第一阶段结果。
+    if solver3 is not None and _is_good_status(status3):
+        final_solver = solver3
+        final_status = status3
+        final_stage = "P3_load_balance"
+        fallback_reason = ""
+    elif stage2_used:
+        final_solver = solver2
+        final_status = status2
+        final_stage = "P2_energy_fallback"
+        fallback_reason = "第三阶段未在限制时间内找到满足前两级目标约束的解，已回退至第二阶段结果。"
+    else:
+        final_solver = solver1
+        final_status = status1
+        final_stage = "P1_time_fallback"
+        fallback_reason = "第二、第三阶段未在限制时间内找到可用解，已回退至第一阶段结果。"
 
     # ============================================================
     # D. 从求解器中提取最终调度结果
@@ -745,12 +825,18 @@ def solve_schedule(instance: Instance, modes_by_task: Dict[int, List[Mode]]) -> 
         "d_balance_minus": final_solver.Value(data["d_balance_minus"]),
         "stage1_status": solver1.StatusName(status1),
         "stage2_status": solver2.StatusName(status2),
-        "stage3_status": final_solver.StatusName(final_status),
+        "stage3_status": solver3.StatusName(status3) if solver3 is not None else "NOT_RUN",
+        "final_stage": final_stage,
+        "fallback_reason": fallback_reason,
+        "stage3_energy_tolerance": STAGE3_ENERGY_TOLERANCE,
+        "stage3_d_energy_tolerance": STAGE3_D_ENERGY_TOLERANCE,
     }
 
     # 最终返回的 result 是整个工程后续保存/画图/打印的统一数据源。
     result = ScheduleResult(
         status=final_solver.StatusName(final_status),
+        final_stage=final_stage,
+        fallback_reason=fallback_reason,
         model_name="考虑序列相关转移时间、任务组级中心区互斥与能耗的多机械臂目标规划模型",
         cmax=final_solver.Value(data["cmax"]),
         motion_energy=final_solver.Value(data["motion_energy"]),

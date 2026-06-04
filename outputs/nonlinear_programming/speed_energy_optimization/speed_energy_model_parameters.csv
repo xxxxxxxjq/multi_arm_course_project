@@ -1,4 +1,0 @@
-﻿preference,alpha_time,beta_energy,speed_min,speed_max,speed_step,rho_dynamic_energy,cmax_model,energy_model,objective
-efficiency_first,0.8,0.2,0.6,1.4,0.01,0.7,Cmax(s)=Cmax0/s,E(s)=E0*((1-rho)+rho*s^2),min alpha*Cmax/Cmax_2arm0 + beta*Energy/Energy_2arm0
-balanced,0.5,0.5,0.6,1.4,0.01,0.7,Cmax(s)=Cmax0/s,E(s)=E0*((1-rho)+rho*s^2),min alpha*Cmax/Cmax_2arm0 + beta*Energy/Energy_2arm0
-energy_first,0.2,0.8,0.6,1.4,0.01,0.7,Cmax(s)=Cmax0/s,E(s)=E0*((1-rho)+rho*s^2),min alpha*Cmax/Cmax_2arm0 + beta*Energy/Energy_2arm0

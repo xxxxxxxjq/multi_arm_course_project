@@ -24,6 +24,7 @@ from __future__ import annotations
 import argparse
 import csv
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -58,19 +59,17 @@ DEFAULT_COUNT_CODES = [
 
 
 CSV_FIELDS = [
-    "counts_code",
     "n1",
     "n2",
     "n3",
     "n4",
     "total_tasks",
     "seed",
-    "status_2B_optimized",
     "cmax_2B_optimized",
     "energy_2B_optimized",
-    "status_3B_optimized",
     "cmax_3B_optimized",
     "energy_3B_optimized",
+    "calc_time_optimized_s",
 ]
 
 
@@ -202,6 +201,7 @@ def main() -> None:
     ensure_dirs(out_dir)
 
     output_path = out_dir / "optimized_2B3B_time_energy.csv"
+
     rows = []
     total_runs = len(count_codes) * len(seeds)
     run_index = 0
@@ -212,62 +212,93 @@ def main() -> None:
 
         for seed in seeds:
             run_index += 1
+
             print(
-                f"\n[batch {run_index}/{total_runs}] counts={counts_code}, "
-                f"seed={seed}, total_tasks={total_tasks}",
+                f"\n[optimized {run_index}/{total_runs}] "
+                f"counts={counts_code}, seed={seed}, total_tasks={total_tasks}",
                 flush=True,
             )
 
-            print(f"[batch {run_index}/{total_runs}] start 2B optimized", flush=True)
+            # 记录本行实验开始时间。
+            # 这里统计的是：
+            # 同一个 counts 和 seed 下，
+            # 2B 优化方法 + 3B 优化方法 两次求解的总耗时。
+            t0 = time.perf_counter()
+
+            print(
+                f"[optimized {run_index}/{total_runs}] start 2B optimized",
+                flush=True,
+            )
+
             result_2b = solve_optimized_case(
                 counts_text=counts_text,
                 seed=seed,
                 arm_count=2,
             )
+
             print(
-                f"[batch {run_index}/{total_runs}] finish 2B: "
+                f"[optimized {run_index}/{total_runs}] finish 2B: "
                 f"status={result_2b.get('status', '')}, "
                 f"cmax={result_2b.get('cmax', '')}, "
                 f"energy={result_2b.get('total_energy', '')}",
                 flush=True,
             )
 
-            print(f"[batch {run_index}/{total_runs}] start 3B optimized", flush=True)
+            print(
+                f"[optimized {run_index}/{total_runs}] start 3B optimized",
+                flush=True,
+            )
+
             result_3b = solve_optimized_case(
                 counts_text=counts_text,
                 seed=seed,
                 arm_count=3,
             )
+
             print(
-                f"[batch {run_index}/{total_runs}] finish 3B: "
+                f"[optimized {run_index}/{total_runs}] finish 3B: "
                 f"status={result_3b.get('status', '')}, "
                 f"cmax={result_3b.get('cmax', '')}, "
                 f"energy={result_3b.get('total_energy', '')}",
                 flush=True,
             )
 
+            # 记录本行实验结束时间。
+            t1 = time.perf_counter()
+            calc_time_optimized = t1 - t0
+
             rows.append({
-                "counts_code": counts_code,
                 "n1": counts[1],
                 "n2": counts[2],
                 "n3": counts[3],
                 "n4": counts[4],
                 "total_tasks": total_tasks,
                 "seed": seed,
-                "status_2B_optimized": result_2b.get("status", ""),
                 "cmax_2B_optimized": to_float_or_blank(result_2b.get("cmax")),
                 "energy_2B_optimized": to_float_or_blank(result_2b.get("total_energy")),
-                "status_3B_optimized": result_3b.get("status", ""),
                 "cmax_3B_optimized": to_float_or_blank(result_3b.get("cmax")),
                 "energy_3B_optimized": to_float_or_blank(result_3b.get("total_energy")),
+                "calc_time_optimized_s": round(calc_time_optimized, 6),
             })
+
             save_csv(rows, output_path)
-            print(f"[batch {run_index}/{total_runs}] saved partial CSV: {output_path}", flush=True)
+
+            print(
+                f"[optimized {run_index}/{total_runs}] saved partial CSV: {output_path}",
+                flush=True,
+            )
+
+            print(
+                f"[optimized {run_index}/{total_runs}] "
+                f"calc_time={calc_time_optimized:.6f}s",
+                flush=True,
+            )
 
     save_csv(rows, output_path)
 
     print("\nCSV 生成完成。")
     print(f"输出文件：{output_path}")
+    print("说明：该 CSV 只包含优化方法下二臂和三臂的 Cmax、总能耗和每行计算耗时，不包含分析结论。")
 
 
 if __name__ == "__main__":

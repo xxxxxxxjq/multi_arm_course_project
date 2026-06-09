@@ -17,5 +17,5 @@ if __name__ == "__main__":
         scenario_id="06_optimized_heuristic_three_arm",
         scenario_name="第六部分：运筹学 + 启发式算法 三机械臂调度",
         arm_count=3,
-        algorithm="optimized_heuristic2",
+        algorithm="optimized_heuristic",
     )

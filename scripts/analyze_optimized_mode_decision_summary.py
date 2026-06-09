@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
 """二臂/三臂运行模式选择分析：按 counts_code 汇总 seed 平均，并进行多组时间-能耗偏好对比。
 
-上游输入：
-    outputs/four_case_framework/basic_2B3B_time_energy.csv
+默认上游输入：
+    outputs/four_case_framework/optimized_2B3B_time_energy.csv
 
 该文件通常由：
-    python scripts/run_basic_case.py
+    python scripts/run_optimized_case.py
 生成，包含同一任务输入下二臂和三臂的 Cmax 与总能耗。
 
 本脚本做的事情：
 1. 不重新求解调度问题；
-2. 读取 basic_2B3B_time_energy.csv；
+2. 读取 optimized_2B3B_time_energy.csv；
 3. 对每一种 counts_code，只在该 counts_code 内部对 seed=0,1,2 取平均；
 4. 输出一个 16 行左右的汇总 CSV；
 5. 设置 10 组时间-能耗偏好参数 lambda，比较不同偏好下推荐二臂还是三臂；
@@ -36,15 +36,11 @@ lambda 的含义：
     lambda 越大，越重视能耗。
     例如 lambda=5 表示 1% 的能耗增加需要至少 5% 的时间节省来抵消。
 
-敏感性分析含义：
-    decision_lambda_star 表示二臂/三臂推荐结果发生切换的临界 lambda。
-    当 lambda 小于或大于该临界值时，推荐结果会保持不变。
-
 输出：
-    outputs/mode_decision/mode_decision_summary_basic.csv
+    outputs/mode_decision/mode_decision_summary_optimized.csv
 
 运行方式：
-    python scripts/analyze_basic_mode_decision_summary.py
+    python scripts/analyze_optimized_mode_decision_summary.py
 """
 
 from __future__ import annotations
@@ -58,8 +54,14 @@ from typing import Any
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
 
-DEFAULT_INPUT = PROJECT_DIR / "outputs" / "four_case_framework" / "basic_2B3B_time_energy.csv"
-DEFAULT_OUTPUT = PROJECT_DIR / "outputs" / "mode_decision" / "mode_decision_summary_basic.csv"
+# ============================================================
+# 只需要改这里，就能切换 basic / optimized
+# 当前默认分析 optimized_2B3B_time_energy.csv
+# ============================================================
+METHOD = "optimized"
+
+DEFAULT_INPUT = PROJECT_DIR / "outputs" / "four_case_framework" / f"{METHOD}_2B3B_time_energy.csv"
+DEFAULT_OUTPUT = PROJECT_DIR / "outputs" / "mode_decision" / f"mode_decision_summary_{METHOD}.csv"
 
 
 # 不再使用严格的 VALID_STATUS。
@@ -179,16 +181,23 @@ def classify_scenario(n1: int, n2: int, n3: int, n4: int) -> str:
     return "mixed_balanced"
 
 
+def get_col(row: dict, name: str) -> Any:
+    """读取指定列；如果列不存在，返回空字符串。"""
+    return row.get(name, "")
+
+
 def calc_one_seed_metrics(row: dict) -> dict | None:
-    """计算单个 seed 下的二/三臂对比指标。
+    """计算单个 seed 下的二/三臂对比指标。"""
 
-    注意：
-    这里不再用固定 VALID_STATUS 强行筛选。
-    只要状态不是明确失败，并且 cmax / energy 有有效数值，就参与汇总。
-    """
+    status_2b_col = f"status_2B_{METHOD}"
+    status_3b_col = f"status_3B_{METHOD}"
+    cmax_2b_col = f"cmax_2B_{METHOD}"
+    cmax_3b_col = f"cmax_3B_{METHOD}"
+    energy_2b_col = f"energy_2B_{METHOD}"
+    energy_3b_col = f"energy_3B_{METHOD}"
 
-    status_2b_raw = row.get("status_2B_basic", "")
-    status_3b_raw = row.get("status_3B_basic", "")
+    status_2b_raw = get_col(row, status_2b_col)
+    status_3b_raw = get_col(row, status_3b_col)
 
     status_2b = normalize_status(status_2b_raw)
     status_3b = normalize_status(status_3b_raw)
@@ -197,10 +206,10 @@ def calc_one_seed_metrics(row: dict) -> dict | None:
     if status_2b in INVALID_STATUS or status_3b in INVALID_STATUS:
         return None
 
-    cmax_2 = safe_float(row.get("cmax_2B_basic"))
-    cmax_3 = safe_float(row.get("cmax_3B_basic"))
-    energy_2 = safe_float(row.get("energy_2B_basic"))
-    energy_3 = safe_float(row.get("energy_3B_basic"))
+    cmax_2 = safe_float(get_col(row, cmax_2b_col))
+    cmax_3 = safe_float(get_col(row, cmax_3b_col))
+    energy_2 = safe_float(get_col(row, energy_2b_col))
+    energy_3 = safe_float(get_col(row, energy_3b_col))
 
     # 如果关键数值不存在或为 0，才跳过。
     if cmax_2 <= 0 or cmax_3 <= 0 or energy_2 <= 0 or energy_3 <= 0:
@@ -210,7 +219,6 @@ def calc_one_seed_metrics(row: dict) -> dict | None:
     eta_e = (energy_3 - energy_2) / energy_2 * 100
 
     # 单个 seed 下的临界 lambda。
-    # 这里保留原有逻辑，不改变原输出列 mean_lambda_star 的来源。
     if eta_e > 0:
         lambda_star = eta_t / eta_e
     elif eta_t > 0 and eta_e <= 0:
@@ -226,8 +234,10 @@ def calc_one_seed_metrics(row: dict) -> dict | None:
         "n3": safe_int(row.get("n3")),
         "n4": safe_int(row.get("n4")),
         "total_tasks": safe_int(row.get("total_tasks")),
-        "status_2B_basic": status_2b_raw,
-        "status_3B_basic": status_3b_raw,
+
+        f"status_2B_{METHOD}": status_2b_raw,
+        f"status_3B_{METHOD}": status_3b_raw,
+
         "cmax_2B": cmax_2,
         "cmax_3B": cmax_3,
         "energy_2B": energy_2,
@@ -275,7 +285,7 @@ def format_lambda_boundary(value: float) -> str:
 def make_lambda_condition(mean_eta_t: float, mean_eta_e: float) -> dict:
     """生成二臂/三臂适用条件。
 
-    这里使用同一个 counts_code 汇总后的 mean_eta_T 和 mean_eta_E 计算临界 lambda。
+    使用同一个 counts_code 汇总后的 mean_eta_T 和 mean_eta_E 计算临界 lambda。
 
     记：
         S_lambda = mean_eta_T - lambda * mean_eta_E
@@ -283,13 +293,9 @@ def make_lambda_condition(mean_eta_t: float, mean_eta_e: float) -> dict:
     若 S_lambda > 0，推荐三臂；
     若 S_lambda < 0，推荐二臂；
     若 S_lambda = 0，二臂和三臂近似无差别。
-
-    这部分对应敏感性分析中的：
-        参数 lambda 变化时，推荐方案保持不变的范围。
     """
 
     # 情况1：三臂更快，而且能耗不增加。
-    # 三臂在时间和能耗上都不吃亏，所以所有 lambda 下都推荐三臂。
     if mean_eta_t > EPS and mean_eta_e <= EPS:
         return {
             "decision_lambda_star": "inf",
@@ -299,7 +305,6 @@ def make_lambda_condition(mean_eta_t: float, mean_eta_e: float) -> dict:
         }
 
     # 情况2：三臂不更快，而且能耗不降低。
-    # 二臂在时间和能耗上都不吃亏，所以所有 lambda 下都推荐二臂。
     if mean_eta_t <= EPS and mean_eta_e >= -EPS:
         return {
             "decision_lambda_star": "0.00",
@@ -309,9 +314,6 @@ def make_lambda_condition(mean_eta_t: float, mean_eta_e: float) -> dict:
         }
 
     # 情况3：三臂更快，但能耗更高。
-    # 这是最典型的时间-能耗权衡：
-    # lambda 小，重视时间，推荐三臂；
-    # lambda 大，重视能耗，推荐二臂。
     if mean_eta_t > EPS and mean_eta_e > EPS:
         boundary = mean_eta_t / mean_eta_e
         boundary_text = format_lambda_boundary(boundary)
@@ -324,8 +326,6 @@ def make_lambda_condition(mean_eta_t: float, mean_eta_e: float) -> dict:
         }
 
     # 情况4：三臂更慢，但能耗更低。
-    # lambda 小，重视时间，推荐二臂；
-    # lambda 大，重视能耗，推荐三臂。
     if mean_eta_t < -EPS and mean_eta_e < -EPS:
         boundary = mean_eta_t / mean_eta_e
         boundary_text = format_lambda_boundary(boundary)
@@ -338,8 +338,6 @@ def make_lambda_condition(mean_eta_t: float, mean_eta_e: float) -> dict:
         }
 
     # 情况5：三臂时间基本相同，但能耗更低。
-    # 当 lambda = 0 时只看时间，所以二者近似无差别；
-    # 当 lambda > 0 时考虑能耗，推荐三臂。
     if abs(mean_eta_t) <= EPS and mean_eta_e < -EPS:
         return {
             "decision_lambda_star": "0.00",
@@ -348,7 +346,7 @@ def make_lambda_condition(mean_eta_t: float, mean_eta_e: float) -> dict:
             "lambda_condition_similar": "lambda = 0",
         }
 
-    # 理论兜底，正常情况下很少进入这里。
+    # 理论兜底。
     return {
         "decision_lambda_star": "",
         "lambda_condition_recommend_3arm": "",
@@ -383,7 +381,6 @@ def make_summary_row(group_rows: list[dict]) -> dict:
 
     # 这里的 mean_lambda_star 保持原逻辑：
     # 每个 seed 先算 lambda_star，再在同一 counts_code 内部求平均。
-    # 该列用于保留原表格内容。
     if finite_lambda_values:
         mean_lambda_star = mean(finite_lambda_values)
     else:
@@ -423,11 +420,6 @@ def make_summary_row(group_rows: list[dict]) -> dict:
     row["recommend_energy_only"] = recommend_energy_only(mean_energy_2, mean_energy_3)
 
     # 新增：敏感性分析条件区间。
-    # 这里只保留 4 个字段：
-    # decision_lambda_star
-    # lambda_condition_recommend_3arm
-    # lambda_condition_recommend_2arm
-    # lambda_condition_similar
     condition_info = make_lambda_condition(mean_eta_t, mean_eta_e)
     row.update(condition_info)
 
@@ -463,7 +455,6 @@ def build_summary_rows(raw_rows: list[dict]) -> tuple[list[dict], int]:
     summary_rows = []
 
     # 按输入 CSV 中第一次出现的 counts_code 顺序输出。
-    # 这样可以保留 run_basic_case.py 生成结果时的顺序。
     for key in group_order:
         group_rows = sorted(groups[key], key=lambda r: r["seed"])
         summary_rows.append(make_summary_row(group_rows))
@@ -471,14 +462,27 @@ def build_summary_rows(raw_rows: list[dict]) -> tuple[list[dict], int]:
     return summary_rows, skipped
 
 
+def print_column_warning() -> None:
+    """当没有生成有效汇总结果时，提示需要检查的列名。"""
+    print("\nWarning: input CSV was read, but no valid summary rows were generated.")
+    print("Please check whether these columns exist and contain positive numbers:")
+    print(f"  cmax_2B_{METHOD}")
+    print(f"  energy_2B_{METHOD}")
+    print(f"  cmax_3B_{METHOD}")
+    print(f"  energy_3B_{METHOD}")
+    print("And please check whether these status columns are not failed:")
+    print(f"  status_2B_{METHOD}")
+    print(f"  status_3B_{METHOD}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Summarize 2B/3B mode decision by counts_code with seed averaging and 10 lambda values."
+        description=f"Summarize 2B/3B mode decision by counts_code for {METHOD} results."
     )
     parser.add_argument(
         "--input",
         default=str(DEFAULT_INPUT),
-        help="input CSV generated by scripts/run_basic_case.py",
+        help=f"input CSV generated by scripts/run_{METHOD}_case.py",
     )
     parser.add_argument(
         "--output",
@@ -500,6 +504,7 @@ def main() -> None:
     save_csv(summary_rows, output_path)
 
     print("Mode decision summary finished.")
+    print(f"Method: {METHOD}")
     print(f"Input: {input_path}")
     print(f"Output: {output_path}")
     print(f"Raw rows read: {len(raw_rows)}")
@@ -514,12 +519,7 @@ def main() -> None:
     print("  lambda_condition_similar")
 
     if len(raw_rows) > 0 and len(summary_rows) == 0:
-        print("\nWarning: input CSV was read, but no valid summary rows were generated.")
-        print("Please check whether these columns exist and contain positive numbers:")
-        print("  cmax_2B_basic")
-        print("  energy_2B_basic")
-        print("  cmax_3B_basic")
-        print("  energy_3B_basic")
+        print_column_warning()
 
 
 if __name__ == "__main__":

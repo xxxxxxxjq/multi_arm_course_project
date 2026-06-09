@@ -79,6 +79,9 @@ def get_solver(algorithm: str):
     if algorithm == "optimized":
         from common.solver_optimized import solve_schedule
         return solve_schedule
+    if algorithm == "optimized_heuristic":
+        from common.solver_optimized_heuristic import solve_schedule
+        return solve_schedule
     raise ValueError(f"未知算法：{algorithm}")
 
 

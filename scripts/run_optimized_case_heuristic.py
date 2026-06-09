@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""批量生成经典方法下二臂/三臂的时间和能量参数 CSV。
+"""批量生成“优化方法 + 启发式算法”下二臂/三臂的时间和能量参数 CSV。
 
 作用：
 1. 默认运行 16 种 Type 输入：
@@ -10,13 +10,12 @@
    seed = 0, 1, 2
 
 3. 每次分别运行：
-   双臂经典方法
-   三臂经典方法
+   双臂 优化方法 + 启发式算法
+   三臂 优化方法 + 启发式算法
 
 4. 只输出一个 CSV：
-   outputs/four_case_framework/basic_2B3B_time_energy.csv
+   outputs/four_case_framework/optimized_heuristic_2B3B_time_energy.csv
 
-5. CSV 只记录时间和能量参数，不做任何分析、不下结论。
 """
 
 from __future__ import annotations
@@ -36,6 +35,9 @@ from common.config import OUTPUT_DIR  # noqa: E402
 from common.instance_generator import generate_instance  # noqa: E402
 from common.mode_builder import build_modes  # noqa: E402
 from common.utils import ensure_dirs  # noqa: E402
+
+
+METHOD = "optimized_heuristic"
 
 
 DEFAULT_COUNT_CODES = [
@@ -59,17 +61,23 @@ DEFAULT_COUNT_CODES = [
 
 
 CSV_FIELDS = [
+    "counts_code",
     "n1",
     "n2",
     "n3",
     "n4",
     "total_tasks",
     "seed",
-    "cmax_2B_basic",
-    "energy_2B_basic",
-    "cmax_3B_basic",
-    "energy_3B_basic",
-    "calc_time_basic_s",
+
+    "status_2B_optimized_heuristic",
+    "cmax_2B_optimized_heuristic",
+    "energy_2B_optimized_heuristic",
+
+    "status_3B_optimized_heuristic",
+    "cmax_3B_optimized_heuristic",
+    "energy_3B_optimized_heuristic",
+
+    "calc_time_optimized_heuristic_s",
 ]
 
 
@@ -151,9 +159,9 @@ def save_csv(rows: list[dict], path: Path) -> None:
         writer.writerows(rows)
 
 
-def solve_basic_case(counts_text: str, seed: int, arm_count: int) -> dict:
-    """运行指定机械臂数量下的经典/基础方法。"""
-    from common.solver_basic import solve_schedule
+def solve_optimized_heuristic_case(counts_text: str, seed: int, arm_count: int) -> dict:
+    """运行指定机械臂数量下的“优化方法 + 启发式算法”。"""
+    from common.solver_optimized_heuristic import solve_schedule
 
     counts = parse_counts(counts_text)
     block_types = counts_to_block_types(counts)
@@ -172,7 +180,7 @@ def solve_basic_case(counts_text: str, seed: int, arm_count: int) -> dict:
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="批量生成经典方法下二臂/三臂的 Cmax 和能耗 CSV"
+        description="批量生成优化方法 + 启发式算法下二臂/三臂的 Cmax 和能耗 CSV"
     )
 
     parser.add_argument(
@@ -200,7 +208,7 @@ def main() -> None:
     out_dir = OUTPUT_DIR / "four_case_framework"
     ensure_dirs(out_dir)
 
-    output_path = out_dir / "basic_2B3B_time_energy.csv"
+    output_path = out_dir / f"{METHOD}_2B3B_time_energy.csv"
 
     rows = []
     total_runs = len(count_codes) * len(seeds)
@@ -213,54 +221,88 @@ def main() -> None:
         for seed in seeds:
             run_index += 1
 
-            # 记录本行实验开始时间。
-            # 这里统计的是：
-            # 同一个 counts 和 seed 下，
-            # 2B 经典方法 + 3B 经典方法 两次求解的总耗时。
+            print(
+                f"\n[{METHOD} {run_index}/{total_runs}] "
+                f"counts={counts_code}, seed={seed}, total_tasks={total_tasks}",
+                flush=True,
+            )
+
+            # 统计同一个 counts 和 seed 下：
+            # 2B 启发式 + 3B 启发式 两次求解的总耗时。
             t0 = time.perf_counter()
 
-            result_2b = solve_basic_case(
+            print(
+                f"[{METHOD} {run_index}/{total_runs}] start 2B {METHOD}",
+                flush=True,
+            )
+
+            result_2b = solve_optimized_heuristic_case(
                 counts_text=counts_text,
                 seed=seed,
                 arm_count=2,
             )
 
-            result_3b = solve_basic_case(
+            print(
+                f"[{METHOD} {run_index}/{total_runs}] finish 2B: "
+                f"status={result_2b.get('status', '')}, "
+                f"cmax={result_2b.get('cmax', '')}, "
+                f"energy={result_2b.get('total_energy', '')}",
+                flush=True,
+            )
+
+            print(
+                f"[{METHOD} {run_index}/{total_runs}] start 3B {METHOD}",
+                flush=True,
+            )
+
+            result_3b = solve_optimized_heuristic_case(
                 counts_text=counts_text,
                 seed=seed,
                 arm_count=3,
             )
 
-            # 记录本行实验结束时间。
+            print(
+                f"[{METHOD} {run_index}/{total_runs}] finish 3B: "
+                f"status={result_3b.get('status', '')}, "
+                f"cmax={result_3b.get('cmax', '')}, "
+                f"energy={result_3b.get('total_energy', '')}",
+                flush=True,
+            )
+
             t1 = time.perf_counter()
-            calc_time_basic = t1 - t0
+            calc_time = t1 - t0
 
             rows.append({
+                "counts_code": counts_code,
                 "n1": counts[1],
                 "n2": counts[2],
                 "n3": counts[3],
                 "n4": counts[4],
                 "total_tasks": total_tasks,
                 "seed": seed,
-                "cmax_2B_basic": to_float_or_blank(result_2b.get("cmax")),
-                "energy_2B_basic": to_float_or_blank(result_2b.get("total_energy")),
-                "cmax_3B_basic": to_float_or_blank(result_3b.get("cmax")),
-                "energy_3B_basic": to_float_or_blank(result_3b.get("total_energy")),
-                "calc_time_basic_s": round(calc_time_basic, 6),
+
+                "status_2B_optimized_heuristic": result_2b.get("status", ""),
+                "cmax_2B_optimized_heuristic": to_float_or_blank(result_2b.get("cmax")),
+                "energy_2B_optimized_heuristic": to_float_or_blank(result_2b.get("total_energy")),
+
+                "status_3B_optimized_heuristic": result_3b.get("status", ""),
+                "cmax_3B_optimized_heuristic": to_float_or_blank(result_3b.get("cmax")),
+                "energy_3B_optimized_heuristic": to_float_or_blank(result_3b.get("total_energy")),
+
+                "calc_time_optimized_heuristic_s": round(calc_time, 6),
             })
 
+            # 每跑完一行就保存一次，防止中途报错导致前面结果丢失。
             save_csv(rows, output_path)
 
             print(
-                f"[basic {run_index}/{total_runs}] "
-                f"counts={counts_code}, seed={seed}, tasks={total_tasks}, "
-                f"2B status={result_2b.get('status', '')}, "
-                f"cmax={result_2b.get('cmax', '')}, "
-                f"energy={result_2b.get('total_energy', '')}; "
-                f"3B status={result_3b.get('status', '')}, "
-                f"cmax={result_3b.get('cmax', '')}, "
-                f"energy={result_3b.get('total_energy', '')}; "
-                f"calc_time={calc_time_basic:.6f}s",
+                f"[{METHOD} {run_index}/{total_runs}] saved partial CSV: {output_path}",
+                flush=True,
+            )
+
+            print(
+                f"[{METHOD} {run_index}/{total_runs}] "
+                f"calc_time={calc_time:.6f}s",
                 flush=True,
             )
 
@@ -268,6 +310,7 @@ def main() -> None:
 
     print("\nCSV 生成完成。")
     print(f"输出文件：{output_path}")
+    print("说明：该 CSV 只包含优化方法 + 启发式算法下二臂和三臂的 Cmax、总能耗、状态和每行计算耗时，不包含分析结论。")
 
 
 if __name__ == "__main__":

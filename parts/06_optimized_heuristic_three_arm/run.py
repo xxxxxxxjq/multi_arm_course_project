@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""第四部分：运筹学方法 三机械臂调度：独立运行入口。"""
+"""第六部分：运筹学 + 启发式算法 三机械臂调度：独立运行入口。"""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from common.experiment_runner import main_for_scenario  # noqa: E402
 
 if __name__ == "__main__":
     main_for_scenario(
-        scenario_id="04_optimized_three_arm",
-        scenario_name="第四部分：优化方法 三机械臂调度",
+        scenario_id="06_optimized_heuristic_three_arm",
+        scenario_name="第六部分：运筹学 + 启发式算法 三机械臂调度",
         arm_count=3,
-        algorithm="optimized",
+        algorithm="optimized_heuristic2",
     )

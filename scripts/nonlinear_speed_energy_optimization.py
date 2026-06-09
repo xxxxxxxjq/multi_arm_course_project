@@ -1,53 +1,58 @@
 # -*- coding: utf-8 -*-
-"""基于截止时间约束的速度-能耗非线性优化。
+"""非线性规划：seed 平均下的速度-能耗优化、KKT 验证与二臂/三臂模式比较。
 
-本脚本只输出一个结果文件：
-    outputs/nonlinear_programming/speed_energy_optimization/
-        speed_energy_deadline_optimization.csv
 
-核心思想：
-    前面的整数规划/调度模型已经得到二臂和三臂在默认速度下的：
-        Cmax0
-        Energy0
+解决的问题：
+    先通过主问题得到默认速度下的二臂/三臂调度结果：
+        Cmax_2B, Energy_2B, Cmax_3B, Energy_3B
 
-    本脚本不重新改变任务分配和任务顺序，只引入速度倍率 s。
+    对同一 counts_code 下 seed=0,1,2 的结果取平均，
+    得到代表性平均场景：
+        mean_cmax_2B, mean_energy_2B
+        mean_cmax_3B, mean_energy_3B
 
-非线性规划模型：
-    对二臂和三臂分别求解：
+    在固定离散调度结果的基础上，只引入一个连续变量：
+        s = 速度倍率
 
-        min Energy(s)
-        s.t. Cmax(s) <= D
-             speed_min <= s <= speed_max
+连续非线性规划模型：
+    对 m in {2B, 3B} 分别求解：
 
-    其中：
-        Cmax(s) = Cmax0 / s
-        Energy(s) = Energy0 * ((1-rho) + rho*s^2)
+        min  E_m(s) = E_m0 * [(1-rho) + rho*s^2]
 
-    D 为截止时间要求。
+        s.t. C_m0 / s <= D
+             s_min <= s <= s_max
 
-数值解法：
-    使用课件中的“内点法 + 0.618法”。
+其中：
+    C_m0：seed 平均后的默认完工时间；
+    E_m0：seed 平均后的默认总能耗；
+    D：截止时间；
+    rho：速度敏感能耗比例；
+    s：连续速度倍率。
 
-    约束写成严格内点形式：
-        g1(s) = s - speed_min > 0
-        g2(s) = speed_max - s > 0
-        g3(s) = D - Cmax0/s > 0
+    g1(s) = s - s_min >= 0
+    g2(s) = s_max - s >= 0
+    g3(s) = D - C0/s >= 0
 
-    构造障碍函数：
-        B(s,r) = Energy(s)
-                 - r * [log(g1(s)) + log(g2(s)) + log(g3(s))]
+方法：
+    1. 有约束非线性规划建模；
+    2. 内点制约函数法：
+           Phi(s, mu) = E(s) - mu * sum(log(g_i(s)))
+    3. 0.618 黄金分割法求一维极小；
+    4. KKT 条件验证：
+           stationarity
+           primal feasibility
+           dual feasibility
+           complementary slackness
+    5. 二分法求二臂/三臂能耗相等的切换边界：
+           A(r) = E*_2B(r) - E*_3B(r) = 0
 
-    每个 r 下用 0.618 法求 B(s,r) 的一维极小值；
-    然后逐步减小 r，使结果逼近原约束问题最优解。
+默认输入：
+    outputs/four_case_framework/optimized_2B3B_time_energy.csv
 
-默认截止时间状态：
-    loose_deadline  : D = 1.50 * Cmax_2B
-    normal_deadline : D = 1.00 * Cmax_2B
-    tight_deadline  : D = 0.80 * Cmax_2B
-    urgent_deadline : D = 0.70 * Cmax_2B
+默认输出：
+    outputs/nonlinear_programming/speed_energy_optimization/speed_energy_optimization.csv
+    outputs/nonlinear_programming/speed_energy_optimization/kkt_verification.csv
 
-运行方式：
-    python scripts/nonlinear_speed_energy_optimization.py
 """
 
 from __future__ import annotations
@@ -55,147 +60,227 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import sys
+from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_DIR))
 
-DEFAULT_SUMMARY_INPUT = (
-    PROJECT_DIR
-    / "outputs"
-    / "mode_decision"
-    / "mode_decision_summary_basic.csv"
-)
-
-DEFAULT_RAW_INPUT = (
-    PROJECT_DIR
-    / "outputs"
-    / "four_case_framework"
-    / "basic_2B3B_time_energy.csv"
-)
-
-DEFAULT_OUTPUT_DIR = (
-    PROJECT_DIR
-    / "outputs"
-    / "nonlinear_programming"
-    / "speed_energy_optimization"
-)
-
-OUTPUT_FILENAME = "speed_energy_deadline_optimization.csv"
+from common.config import OUTPUT_DIR  # noqa: E402
+from common.utils import ensure_dirs  # noqa: E402
 
 
-# 速度倍率约束。
-SPEED_MIN = 0.6
-SPEED_MAX = 1.4
+# ============================================================
+# 默认参数
+# ============================================================
 
-# 动态能耗占比。
-# rho 越大，速度平方项对能耗影响越明显。
-DYNAMIC_ENERGY_RATIO = 0.7
+DEFAULT_METHOD = "optimized"
 
-# 内点法参数。
-BARRIER_INITIAL_R = 1.0
-BARRIER_FACTOR = 10.0
-BARRIER_MIN_R = 1e-7
-OUTER_TOL = 1e-7
-INNER_TOL = 1e-8
-MAX_OUTER_ITER = 30
-MAX_INNER_ITER = 300
-
-# 0.618 法中的黄金比例。
-GOLDEN_RATIO = 0.6180339887498949
-
-# 截止时间状态。
-# multiplier 表示 D = multiplier * Cmax_2B。
-DEADLINE_SCENARIOS = [
-    {
-        "deadline_type": "loose_deadline",
-        "deadline_multiplier_of_2B_cmax": 1.50,
-        "deadline_note": "time requirement is loose",
-    },
-    {
-        "deadline_type": "normal_deadline",
-        "deadline_multiplier_of_2B_cmax": 1.00,
-        "deadline_note": "time requirement equals original 2-arm Cmax",
-    },
-    {
-        "deadline_type": "tight_deadline",
-        "deadline_multiplier_of_2B_cmax": 0.80,
-        "deadline_note": "time requirement is tight",
-    },
-    {
-        "deadline_type": "urgent_deadline",
-        "deadline_multiplier_of_2B_cmax": 0.70,
-        "deadline_note": "time requirement is very urgent",
-    },
+# deadline_ratio = 1.00 表示 D = 平均二臂 Cmax。
+# 小于 1 表示任务更紧急，大于 1 表示截止时间更宽松。
+DEFAULT_DEADLINE_RATIOS = [
+    0.70,
+    0.75,
+    0.80,
+    0.85,
+    0.90,
+    0.95,
+    1.00,
+    1.05,
+    1.10,
+    1.15,
+    1.20,
+    1.25,
+    1.30,
+    1.35,
+    1.40,
+    1.50,
 ]
 
+DEFAULT_SPEED_MIN = 0.60
+DEFAULT_SPEED_MAX = 1.60
 
-INVALID_STATUS = {
-    "INFEASIBLE",
-    "NO_SOLUTION",
-    "FAILED",
-    "FAIL",
-    "ERROR",
-    "TIMEOUT",
-}
+# 速度敏感能耗比例。
+DEFAULT_RHO = 0.35
+
+# 0.618 黄金分割法参数。
+GOLDEN_RATIO = 0.6180339887498949
+GOLDEN_TOL = 1e-8
+GOLDEN_MAX_ITER = 200
+
+# 内点制约函数参数。
+BARRIER_MU_VALUES = [1.0, 0.3, 0.1, 0.03, 0.01, 0.003, 0.001]
+
+# 二分法参数，用于寻找 E2*=E3* 的切换点。
+BISECTION_TOL = 1e-6
+BISECTION_MAX_ITER = 100
+
+EPS = 1e-9
+KKT_TOL = 1e-5
 
 
-def normalize_status(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value).strip().upper()
+# ============================================================
+# 数据结构
+# ============================================================
+
+@dataclass
+class AveragedCase:
+    """同一个 counts_code 下 seed 平均后的代表性场景。"""
+
+    counts_code: str
+    n1: int
+    n2: int
+    n3: int
+    n4: int
+    total_tasks: int
+    seed_count: int
+    seeds_used: str
+
+    mean_cmax_2b: float
+    mean_energy_2b: float
+    mean_cmax_3b: float
+    mean_energy_3b: float
+
+    std_cmax_2b: float
+    std_energy_2b: float
+    std_cmax_3b: float
+    std_energy_3b: float
 
 
-def safe_float(value: Any) -> float:
+@dataclass
+class SpeedOptResult:
+    """某个模式在某个截止时间下的速度优化结果。"""
+
+    feasible: bool
+    base_cmax: float
+    base_energy: float
+    deadline: float
+    required_speed: float
+
+    opt_speed_kkt: float | None
+    opt_energy_kkt: float | None
+    opt_cmax_after_speed: float | None
+
+    barrier_speed: float | None
+    barrier_energy: float | None
+    barrier_iterations: int
+
+    active_constraints: str
+    infeasible_reason: str
+
+
+@dataclass
+class KKTCheck:
+    """KKT 条件检验结果。"""
+
+    feasible: bool
+
+    g_lower: float | None
+    g_upper: float | None
+    g_deadline: float | None
+
+    mu_lower: float | None
+    mu_upper: float | None
+    mu_deadline: float | None
+
+    stationarity_residual: float | None
+    max_complementarity_error: float | None
+    primal_min: float | None
+    dual_min: float | None
+
+    kkt_pass: bool
+    kkt_note: str
+
+
+@dataclass
+class BoundaryInfo:
+    """二臂/三臂切换边界信息。"""
+
+    boundary_type: str
+    switch_boundary_ratio_estimate: float | None
+    boundary_interval_low: float | None
+    boundary_interval_high: float | None
+    advantage_at_boundary: float | None
+    boundary_method: str
+    boundary_explanation: str
+
+
+# ============================================================
+# 基础工具函数
+# ============================================================
+
+def safe_float(value: Any, default: float = 0.0) -> float:
+    """安全转换为浮点数。"""
     if value is None or value == "":
-        return 0.0
+        return default
     try:
         return float(value)
     except (TypeError, ValueError):
-        return 0.0
+        return default
 
 
-def safe_int(value: Any) -> int:
+def safe_int(value: Any, default: int = 0) -> int:
+    """安全转换为整数。"""
     if value is None or value == "":
-        return 0
+        return default
     try:
         return int(float(value))
     except (TypeError, ValueError):
-        return 0
+        return default
 
 
-def round2(value: Any) -> float | str:
+def round_or_blank(value: Any, digits: int = 6) -> Any:
+    """数值保留小数；None 输出空白。"""
     if value is None:
         return ""
+
     try:
-        return round(float(value), 2)
+        value_float = float(value)
+
+        if math.isinf(value_float):
+            return "inf"
+
+        if math.isnan(value_float):
+            return ""
+
+        return round(value_float, digits)
+
     except (TypeError, ValueError):
         return ""
 
 
-def round4(value: Any) -> float | str:
-    if value is None:
-        return ""
-    try:
-        return round(float(value), 4)
-    except (TypeError, ValueError):
-        return ""
+def mean(values: list[float]) -> float:
+    """均值。"""
+    return sum(values) / len(values) if values else 0.0
+
+
+def sample_std(values: list[float]) -> float:
+    """样本标准差。"""
+    if len(values) <= 1:
+        return 0.0
+
+    m = mean(values)
+    return math.sqrt(sum((x - m) ** 2 for x in values) / (len(values) - 1))
+
+
+def parse_float_list(text: str) -> list[float]:
+    """解析逗号分隔浮点数列表。"""
+    return [float(x.strip()) for x in text.split(",") if x.strip()]
 
 
 def read_csv(path: Path) -> list[dict]:
+    """读取 CSV。"""
     with path.open("r", encoding="utf-8-sig", newline="") as f:
         return list(csv.DictReader(f))
 
 
-def save_csv(rows: list[dict], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    if not rows:
-        path.write_text("", encoding="utf-8-sig")
-        return
-
-    fieldnames = list(rows[0].keys())
+def save_csv(rows: list[dict], path: Path, fieldnames: list[str]) -> None:
+    """保存 CSV。"""
+    ensure_dirs(path.parent)
 
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
@@ -203,288 +288,172 @@ def save_csv(rows: list[dict], path: Path) -> None:
         writer.writerows(rows)
 
 
-def find_column(fieldnames: list[str], candidates: list[str]) -> str | None:
-    fieldname_set = set(fieldnames)
+def counts_code_from_row(row: dict) -> str:
+    """从行中读取或生成 counts_code。"""
+    if row.get("counts_code"):
+        return str(row["counts_code"])
 
-    for c in candidates:
-        if c in fieldname_set:
-            return c
+    n1 = safe_int(row.get("n1"))
+    n2 = safe_int(row.get("n2"))
+    n3 = safe_int(row.get("n3"))
+    n4 = safe_int(row.get("n4"))
 
-    lower_map = {name.lower(): name for name in fieldnames}
-
-    for c in candidates:
-        if c.lower() in lower_map:
-            return lower_map[c.lower()]
-
-    return None
+    return f"{n1}{n2}{n3}{n4}"
 
 
-def classify_scenario(n1: int, n2: int, n3: int, n4: int) -> str:
+def get_method_columns(method: str) -> dict[str, str]:
+    """根据 method 返回输入 CSV 需要读取的列名。"""
+    return {
+        "cmax_2b": f"cmax_2B_{method}",
+        "energy_2b": f"energy_2B_{method}",
+        "cmax_3b": f"cmax_3B_{method}",
+        "energy_3b": f"energy_3B_{method}",
+    }
+
+
+def scenario_type(n1: int, n2: int, n3: int, n4: int) -> str:
+    """简单任务结构分类，方便后续报告解释。"""
+    single = n1 + n2
+    dual = n3 + n4
+
     if n1 == n2 == n3 == n4:
         return "balanced"
 
     if n4 > max(n1, n2, n3):
         return "type4_dominant"
 
-    single_arm_tasks = n1 + n2
-    dual_arm_tasks = n3 + n4
-
-    if single_arm_tasks > dual_arm_tasks:
+    if single > dual:
         return "single_arm_dominant"
 
-    if dual_arm_tasks > single_arm_tasks:
+    if dual > single:
         return "dual_arm_dominant"
 
     return "mixed_balanced"
 
 
-def load_base_rows_from_summary(summary_path: Path) -> list[dict] | None:
-    """优先从 mode_decision_summary_basic.csv 中读取均值结果。"""
-    if not summary_path.exists():
-        return None
+# ============================================================
+# seed 平均
+# ============================================================
 
-    rows = read_csv(summary_path)
+def build_averaged_cases(raw_rows: list[dict], method: str) -> list[AveragedCase]:
+    """按 counts_code 分组，对 seed=0,1,2 的结果取平均。"""
+    cols = get_method_columns(method)
+    groups: dict[tuple, list[dict]] = defaultdict(list)
 
-    if not rows:
-        return None
-
-    fieldnames = list(rows[0].keys())
-
-    cmax_2_col = find_column(
-        fieldnames,
-        [
-            "mean_cmax_2B",
-            "mean_cmax_2arm",
-            "mean_cmax_2B_basic",
-            "cmax_2B_basic",
-            "cmax_2arm",
-        ],
-    )
-    cmax_3_col = find_column(
-        fieldnames,
-        [
-            "mean_cmax_3B",
-            "mean_cmax_3arm",
-            "mean_cmax_3B_basic",
-            "cmax_3B_basic",
-            "cmax_3arm",
-        ],
-    )
-    energy_2_col = find_column(
-        fieldnames,
-        [
-            "mean_energy_2B",
-            "mean_energy_2arm",
-            "mean_energy_2B_basic",
-            "energy_2B_basic",
-            "energy_2arm",
-        ],
-    )
-    energy_3_col = find_column(
-        fieldnames,
-        [
-            "mean_energy_3B",
-            "mean_energy_3arm",
-            "mean_energy_3B_basic",
-            "energy_3B_basic",
-            "energy_3arm",
-        ],
-    )
-
-    if not all([cmax_2_col, cmax_3_col, energy_2_col, energy_3_col]):
-        return None
-
-    base_rows = []
-
-    for row in rows:
-        n1 = safe_int(row.get("n1"))
-        n2 = safe_int(row.get("n2"))
-        n3 = safe_int(row.get("n3"))
-        n4 = safe_int(row.get("n4"))
-        total_tasks = safe_int(row.get("total_tasks", n1 + n2 + n3 + n4))
-
-        cmax_2 = safe_float(row.get(cmax_2_col))
-        cmax_3 = safe_float(row.get(cmax_3_col))
-        energy_2 = safe_float(row.get(energy_2_col))
-        energy_3 = safe_float(row.get(energy_3_col))
-
-        if cmax_2 <= 0 or cmax_3 <= 0 or energy_2 <= 0 or energy_3 <= 0:
-            continue
-
-        base_rows.append(
-            {
-                "counts_code": row.get("counts_code", ""),
-                "scenario_type": row.get("scenario_type") or classify_scenario(n1, n2, n3, n4),
-                "total_tasks": total_tasks,
-                "n1": n1,
-                "n2": n2,
-                "n3": n3,
-                "n4": n4,
-                "base_cmax_2arm": cmax_2,
-                "base_cmax_3arm": cmax_3,
-                "base_energy_2arm": energy_2,
-                "base_energy_3arm": energy_3,
-                "data_source": "mode_decision_summary_basic.csv",
-            }
-        )
-
-    return base_rows if base_rows else None
-
-
-def load_base_rows_from_raw(raw_path: Path) -> list[dict]:
-    """从 basic_2B3B_time_energy.csv 中按 counts_code 聚合。"""
-    if not raw_path.exists():
-        raise FileNotFoundError(f"Raw input not found: {raw_path}")
-
-    rows = read_csv(raw_path)
-
-    groups: dict[tuple, list[dict]] = {}
-    group_order: list[tuple] = []
-
-    for row in rows:
-        status_2 = normalize_status(row.get("status_2B_basic", ""))
-        status_3 = normalize_status(row.get("status_3B_basic", ""))
-
-        if status_2 in INVALID_STATUS or status_3 in INVALID_STATUS:
-            continue
-
-        cmax_2 = safe_float(row.get("cmax_2B_basic"))
-        cmax_3 = safe_float(row.get("cmax_3B_basic"))
-        energy_2 = safe_float(row.get("energy_2B_basic"))
-        energy_3 = safe_float(row.get("energy_3B_basic"))
-
-        if cmax_2 <= 0 or cmax_3 <= 0 or energy_2 <= 0 or energy_3 <= 0:
-            continue
+    for row in raw_rows:
+        counts_code = counts_code_from_row(row)
 
         n1 = safe_int(row.get("n1"))
         n2 = safe_int(row.get("n2"))
         n3 = safe_int(row.get("n3"))
         n4 = safe_int(row.get("n4"))
-        total_tasks = safe_int(row.get("total_tasks", n1 + n2 + n3 + n4))
-        counts_code = row.get("counts_code", "")
-        scenario_type = classify_scenario(n1, n2, n3, n4)
+        total_tasks = safe_int(row.get("total_tasks"), n1 + n2 + n3 + n4)
 
-        key = (counts_code, scenario_type, total_tasks, n1, n2, n3, n4)
+        cmax_2b = safe_float(row.get(cols["cmax_2b"]))
+        energy_2b = safe_float(row.get(cols["energy_2b"]))
+        cmax_3b = safe_float(row.get(cols["cmax_3b"]))
+        energy_3b = safe_float(row.get(cols["energy_3b"]))
 
-        if key not in groups:
-            groups[key] = []
-            group_order.append(key)
+        if cmax_2b <= 0 or energy_2b <= 0 or cmax_3b <= 0 or energy_3b <= 0:
+            continue
 
+        key = (counts_code, n1, n2, n3, n4, total_tasks)
         groups[key].append(row)
 
-    base_rows = []
+    averaged_cases: list[AveragedCase] = []
 
-    for key in group_order:
-        counts_code, scenario_type, total_tasks, n1, n2, n3, n4 = key
-        group_rows = groups[key]
+    for key, rows in groups.items():
+        counts_code, n1, n2, n3, n4, total_tasks = key
 
-        cmax_2_values = [safe_float(r.get("cmax_2B_basic")) for r in group_rows]
-        cmax_3_values = [safe_float(r.get("cmax_3B_basic")) for r in group_rows]
-        energy_2_values = [safe_float(r.get("energy_2B_basic")) for r in group_rows]
-        energy_3_values = [safe_float(r.get("energy_3B_basic")) for r in group_rows]
+        seeds = [safe_int(r.get("seed")) for r in rows]
+        seeds_used = ",".join(str(x) for x in sorted(seeds))
 
-        base_rows.append(
-            {
-                "counts_code": counts_code,
-                "scenario_type": scenario_type,
-                "total_tasks": total_tasks,
-                "n1": n1,
-                "n2": n2,
-                "n3": n3,
-                "n4": n4,
-                "base_cmax_2arm": sum(cmax_2_values) / len(cmax_2_values),
-                "base_cmax_3arm": sum(cmax_3_values) / len(cmax_3_values),
-                "base_energy_2arm": sum(energy_2_values) / len(energy_2_values),
-                "base_energy_3arm": sum(energy_3_values) / len(energy_3_values),
-                "data_source": "basic_2B3B_time_energy.csv",
-            }
+        cmax_2b_values = [safe_float(r.get(cols["cmax_2b"])) for r in rows]
+        energy_2b_values = [safe_float(r.get(cols["energy_2b"])) for r in rows]
+        cmax_3b_values = [safe_float(r.get(cols["cmax_3b"])) for r in rows]
+        energy_3b_values = [safe_float(r.get(cols["energy_3b"])) for r in rows]
+
+        averaged_cases.append(
+            AveragedCase(
+                counts_code=counts_code,
+                n1=n1,
+                n2=n2,
+                n3=n3,
+                n4=n4,
+                total_tasks=total_tasks,
+                seed_count=len(rows),
+                seeds_used=seeds_used,
+
+                mean_cmax_2b=mean(cmax_2b_values),
+                mean_energy_2b=mean(energy_2b_values),
+                mean_cmax_3b=mean(cmax_3b_values),
+                mean_energy_3b=mean(energy_3b_values),
+
+                std_cmax_2b=sample_std(cmax_2b_values),
+                std_energy_2b=sample_std(energy_2b_values),
+                std_cmax_3b=sample_std(cmax_3b_values),
+                std_energy_3b=sample_std(energy_3b_values),
+            )
         )
 
-    return base_rows
+    return sorted(averaged_cases, key=lambda x: x.counts_code)
 
 
-def load_base_rows(summary_path: Path, raw_path: Path) -> list[dict]:
-    base_rows = load_base_rows_from_summary(summary_path)
-
-    if base_rows is not None:
-        return base_rows
-
-    print("Warning: summary file unavailable or has no valid Cmax/Energy columns.")
-    print("Fallback to raw time-energy file.")
-    return load_base_rows_from_raw(raw_path)
-
+# ============================================================
+# 连续调速模型
+# ============================================================
 
 def cmax_after_speed(base_cmax: float, speed: float) -> float:
+    """速度倍率为 speed 时的完工时间。"""
     return base_cmax / speed
 
 
 def energy_after_speed(base_energy: float, speed: float, rho: float) -> float:
+    """速度倍率为 speed 时的能耗。"""
     return base_energy * ((1.0 - rho) + rho * speed * speed)
 
 
-def energy_objective_for_speed(
-    speed: float,
-    base_energy: float,
-    rho: float,
-) -> float:
-    """非线性目标函数 Energy(s)。"""
-    return energy_after_speed(base_energy, speed, rho)
+def energy_derivative(base_energy: float, speed: float, rho: float) -> float:
+    """能耗函数对速度倍率的一阶导数。"""
+    return 2.0 * base_energy * rho * speed
 
 
-def barrier_energy_objective(
-    speed: float,
-    r: float,
+def constraint_values(
     base_cmax: float,
-    base_energy: float,
     deadline: float,
-    rho: float,
+    speed: float,
     speed_min: float,
     speed_max: float,
-) -> float:
-    """内点法障碍函数。
+) -> tuple[float, float, float]:
+    """返回 g1, g2, g3，均要求 >= 0。"""
+    g_lower = speed - speed_min
+    g_upper = speed_max - speed
+    g_deadline = deadline - base_cmax / speed
 
-    原问题：
-        min Energy(s)
-        s.t. Cmax0/s <= D
-             speed_min <= s <= speed_max
-
-    严格内点约束：
-        g1 = s - speed_min > 0
-        g2 = speed_max - s > 0
-        g3 = deadline - base_cmax / s > 0
-    """
-    g1 = speed - speed_min
-    g2 = speed_max - speed
-    g3 = deadline - base_cmax / speed
-
-    if g1 <= 0 or g2 <= 0 or g3 <= 0:
-        return float("inf")
-
-    original_energy = energy_objective_for_speed(
-        speed=speed,
-        base_energy=base_energy,
-        rho=rho,
-    )
-
-    return original_energy - r * (math.log(g1) + math.log(g2) + math.log(g3))
+    return g_lower, g_upper, g_deadline
 
 
-def golden_section_search(
+# ============================================================
+# 0.618 黄金分割法
+# ============================================================
+
+def golden_section_minimize(
     func: Callable[[float], float],
     left: float,
     right: float,
-    tol: float,
-    max_iter: int,
-) -> dict:
-    """0.618 法求一维极小值。"""
-    if left >= right:
-        raise ValueError("golden_section_search requires left < right")
+    tol: float = GOLDEN_TOL,
+    max_iter: int = GOLDEN_MAX_ITER,
+) -> tuple[float, float, int]:
+    """用 0.618 黄金分割法求一维函数在 [left, right] 上的极小值。"""
+    if not left < right:
+        return left, func(left), 0
 
     a = left
     b = right
 
     x1 = b - GOLDEN_RATIO * (b - a)
     x2 = a + GOLDEN_RATIO * (b - a)
+
     f1 = func(x1)
     f2 = func(x2)
 
@@ -506,501 +475,968 @@ def golden_section_search(
             x2 = a + GOLDEN_RATIO * (b - a)
             f2 = func(x2)
 
-    best_x = (a + b) / 2.0
-    best_f = func(best_x)
-
-    return {
-        "x": best_x,
-        "f": best_f,
-        "iterations": iterations,
-        "final_interval_length": abs(b - a),
-    }
+    x_star = 0.5 * (a + b)
+    return x_star, func(x_star), iterations
 
 
-def optimize_energy_under_deadline(
+# ============================================================
+# 内点制约函数法
+# ============================================================
+
+def barrier_objective(
+    speed: float,
     base_cmax: float,
     base_energy: float,
     deadline: float,
-    rho: float,
     speed_min: float,
     speed_max: float,
-    barrier_initial_r: float,
-    barrier_factor: float,
-    barrier_min_r: float,
-    outer_tol: float,
-    inner_tol: float,
-    max_outer_iter: int,
-    max_inner_iter: int,
-) -> dict:
-    """用内点法 + 0.618 法求满足截止时间约束下的最低能耗速度。"""
+    rho: float,
+    mu: float,
+) -> float:
+    """内点对数制约函数。"""
+    g_lower, g_upper, g_deadline = constraint_values(
+        base_cmax=base_cmax,
+        deadline=deadline,
+        speed=speed,
+        speed_min=speed_min,
+        speed_max=speed_max,
+    )
 
-    if deadline <= 0 or base_cmax <= 0 or base_energy <= 0:
-        return {
-            "status": "INFEASIBLE",
-            "reason": "invalid deadline, cmax, or energy",
-        }
+    # 内点法要求严格可行。
+    if g_lower <= 0 or g_upper <= 0 or g_deadline <= 0:
+        return float("inf")
+
+    original = energy_after_speed(base_energy, speed, rho)
+    barrier = -mu * (
+        math.log(g_lower)
+        + math.log(g_upper)
+        + math.log(g_deadline)
+    )
+
+    return original + barrier
+
+
+def solve_by_barrier_and_golden(
+    base_cmax: float,
+    base_energy: float,
+    deadline: float,
+    speed_min: float,
+    speed_max: float,
+    rho: float,
+) -> tuple[float | None, float | None, int]:
+    """用内点制约函数法 + 0.618 法求近似解。"""
+    required_speed = base_cmax / deadline
+    lower = max(speed_min, required_speed)
+    upper = speed_max
+
+    if lower > upper + EPS:
+        return None, None, 0
+
+    width = upper - lower
+
+    if width <= 1e-10:
+        speed = lower
+        return speed, energy_after_speed(base_energy, speed, rho), 0
+
+    inner_left = lower + max(1e-8, 1e-8 * width)
+    inner_right = upper - max(1e-8, 1e-8 * width)
+
+    if inner_left >= inner_right:
+        speed = 0.5 * (lower + upper)
+        return speed, energy_after_speed(base_energy, speed, rho), 0
+
+    total_iter = 0
+    best_speed = None
+    best_energy = None
+
+    for mu in BARRIER_MU_VALUES:
+        func = lambda s, m=mu: barrier_objective(
+            speed=s,
+            base_cmax=base_cmax,
+            base_energy=base_energy,
+            deadline=deadline,
+            speed_min=speed_min,
+            speed_max=speed_max,
+            rho=rho,
+            mu=m,
+        )
+
+        speed_mu, _phi_mu, iterations = golden_section_minimize(
+            func=func,
+            left=inner_left,
+            right=inner_right,
+        )
+
+        total_iter += iterations
+        best_speed = speed_mu
+        best_energy = energy_after_speed(base_energy, speed_mu, rho)
+
+    return best_speed, best_energy, total_iter
+
+
+# ============================================================
+# KKT 解析解与验证
+# ============================================================
+
+def active_constraint_text(
+    speed: float,
+    base_cmax: float,
+    deadline: float,
+    speed_min: float,
+    speed_max: float,
+) -> str:
+    """判断哪些约束起作用。"""
+    g_lower, g_upper, g_deadline = constraint_values(
+        base_cmax=base_cmax,
+        deadline=deadline,
+        speed=speed,
+        speed_min=speed_min,
+        speed_max=speed_max,
+    )
+
+    active = []
+
+    if abs(g_lower) <= 1e-6:
+        active.append("lower_speed")
+
+    if abs(g_upper) <= 1e-6:
+        active.append("upper_speed")
+
+    if abs(g_deadline) <= 1e-6:
+        active.append("deadline")
+
+    return "+".join(active) if active else "none"
+
+
+def solve_speed_by_kkt_boundary(
+    base_cmax: float,
+    base_energy: float,
+    deadline: float,
+    speed_min: float,
+    speed_max: float,
+    rho: float,
+) -> SpeedOptResult:
+    """根据单调性和 KKT 边界条件求连续调速子问题的最优解。
+
+    因为 E(s)=E0*((1-rho)+rho*s^2) 在 rho>0 且 s>0 时单调递增，
+    所以最优速度一定是满足所有约束的最小速度：
+
+        s* = max(s_min, C0/D)
+
+    若 s* > s_max，则该模式在该截止时间下不可行。
+    """
+    if base_cmax <= 0 or base_energy <= 0 or deadline <= 0:
+        return SpeedOptResult(
+            feasible=False,
+            base_cmax=base_cmax,
+            base_energy=base_energy,
+            deadline=deadline,
+            required_speed=float("inf"),
+            opt_speed_kkt=None,
+            opt_energy_kkt=None,
+            opt_cmax_after_speed=None,
+            barrier_speed=None,
+            barrier_energy=None,
+            barrier_iterations=0,
+            active_constraints="",
+            infeasible_reason="invalid input: Cmax, Energy or deadline is not positive",
+        )
 
     required_speed = base_cmax / deadline
+    opt_speed = max(speed_min, required_speed)
 
-    if required_speed > speed_max + 1e-10:
-        return {
-            "status": "INFEASIBLE",
-            "reason": "required speed exceeds speed_max",
-            "required_speed": required_speed,
-        }
-
-    # 如果理论最优点正好在上边界附近，直接给边界可行近似。
-    if required_speed >= speed_max - 1e-10:
-        speed = speed_max
-        cmax = cmax_after_speed(base_cmax, speed)
-        energy = energy_after_speed(base_energy, speed, rho)
-
-        return {
-            "status": "BOUNDARY_FEASIBLE",
-            "reason": "optimum is near speed_max boundary",
-            "required_speed": required_speed,
-            "speed": speed,
-            "cmax": cmax,
-            "energy": energy,
-            "outer_iterations": 0,
-            "inner_iterations_total": 0,
-            "barrier_r_final": "",
-            "final_interval_length": "",
-        }
-
-    lower_bound = max(speed_min, required_speed)
-    upper_bound = speed_max
-
-    eps = max(1e-12, (speed_max - speed_min) * 1e-10)
-
-    left = lower_bound + eps
-    right = upper_bound - eps
-
-    if left >= right:
-        return {
-            "status": "INFEASIBLE",
-            "reason": "no strict interior point exists",
-            "required_speed": required_speed,
-        }
-
-    r = barrier_initial_r
-    previous_speed: float | None = None
-    final_search: dict | None = None
-    outer_iterations = 0
-    total_inner_iterations = 0
-
-    for outer_idx in range(1, max_outer_iter + 1):
-        outer_iterations = outer_idx
-
-        def current_barrier_func(speed: float) -> float:
-            return barrier_energy_objective(
-                speed=speed,
-                r=r,
-                base_cmax=base_cmax,
-                base_energy=base_energy,
-                deadline=deadline,
-                rho=rho,
-                speed_min=speed_min,
-                speed_max=speed_max,
-            )
-
-        search_result = golden_section_search(
-            func=current_barrier_func,
-            left=left,
-            right=right,
-            tol=inner_tol,
-            max_iter=max_inner_iter,
+    if opt_speed > speed_max + EPS:
+        return SpeedOptResult(
+            feasible=False,
+            base_cmax=base_cmax,
+            base_energy=base_energy,
+            deadline=deadline,
+            required_speed=required_speed,
+            opt_speed_kkt=None,
+            opt_energy_kkt=None,
+            opt_cmax_after_speed=None,
+            barrier_speed=None,
+            barrier_energy=None,
+            barrier_iterations=0,
+            active_constraints="",
+            infeasible_reason="required speed exceeds speed_max",
         )
 
-        speed_star = float(search_result["x"])
-        total_inner_iterations += int(search_result["iterations"])
-        final_search = search_result
+    opt_speed = min(opt_speed, speed_max)
+    opt_energy = energy_after_speed(base_energy, opt_speed, rho)
+    opt_cmax = cmax_after_speed(base_cmax, opt_speed)
 
-        speed_change = (
-            abs(speed_star - previous_speed)
-            if previous_speed is not None
-            else float("inf")
-        )
+    barrier_speed, barrier_energy, barrier_iterations = solve_by_barrier_and_golden(
+        base_cmax=base_cmax,
+        base_energy=base_energy,
+        deadline=deadline,
+        speed_min=speed_min,
+        speed_max=speed_max,
+        rho=rho,
+    )
 
-        previous_speed = speed_star
+    active = active_constraint_text(
+        speed=opt_speed,
+        base_cmax=base_cmax,
+        deadline=deadline,
+        speed_min=speed_min,
+        speed_max=speed_max,
+    )
 
-        if r <= barrier_min_r and speed_change <= outer_tol:
-            break
-
-        if r <= barrier_min_r:
-            break
-
-        r = r / barrier_factor
-
-    if previous_speed is None or final_search is None:
-        return {
-            "status": "INFEASIBLE",
-            "reason": "optimization failed",
-            "required_speed": required_speed,
-        }
-
-    final_speed = previous_speed
-    final_cmax = cmax_after_speed(base_cmax, final_speed)
-    final_energy = energy_after_speed(base_energy, final_speed, rho)
-
-    return {
-        "status": "OPTIMAL",
-        "reason": "solved by interior point method and 0.618 search",
-        "required_speed": required_speed,
-        "speed": final_speed,
-        "cmax": final_cmax,
-        "energy": final_energy,
-        "outer_iterations": outer_iterations,
-        "inner_iterations_total": total_inner_iterations,
-        "barrier_r_final": r,
-        "final_interval_length": final_search["final_interval_length"],
-    }
+    return SpeedOptResult(
+        feasible=True,
+        base_cmax=base_cmax,
+        base_energy=base_energy,
+        deadline=deadline,
+        required_speed=required_speed,
+        opt_speed_kkt=opt_speed,
+        opt_energy_kkt=opt_energy,
+        opt_cmax_after_speed=opt_cmax,
+        barrier_speed=barrier_speed,
+        barrier_energy=barrier_energy,
+        barrier_iterations=barrier_iterations,
+        active_constraints=active,
+        infeasible_reason="",
+    )
 
 
-def choose_mode(result_2arm: dict, result_3arm: dict) -> tuple[str, str]:
-    """根据可行性和能耗选择二臂或三臂。"""
-    status_2 = result_2arm.get("status", "")
-    status_3 = result_3arm.get("status", "")
-
-    feasible_2 = status_2 in {"OPTIMAL", "BOUNDARY_FEASIBLE"}
-    feasible_3 = status_3 in {"OPTIMAL", "BOUNDARY_FEASIBLE"}
-
-    if not feasible_2 and not feasible_3:
-        return "no_feasible_mode", "both 2arm and 3arm cannot meet deadline"
-
-    if feasible_2 and not feasible_3:
-        return "recommend_2arm", "only 2arm can meet deadline"
-
-    if feasible_3 and not feasible_2:
-        return "recommend_3arm", "only 3arm can meet deadline"
-
-    energy_2 = safe_float(result_2arm.get("energy"))
-    energy_3 = safe_float(result_3arm.get("energy"))
-
-    if energy_2 < energy_3:
-        return "recommend_2arm", "both feasible, 2arm has lower energy"
-
-    if energy_3 < energy_2:
-        return "recommend_3arm", "both feasible, 3arm has lower energy"
-
-    return "similar_prefer_2arm", "both feasible and energy is similar"
-
-
-def build_result_rows(
-    base_rows: list[dict],
-    rho: float,
+def verify_kkt(
+    result: SpeedOptResult,
     speed_min: float,
     speed_max: float,
-    barrier_initial_r: float,
-    barrier_factor: float,
-    barrier_min_r: float,
-    outer_tol: float,
-    inner_tol: float,
-    max_outer_iter: int,
-    max_inner_iter: int,
-) -> list[dict]:
-    result_rows = []
+    rho: float,
+) -> KKTCheck:
+    """验证 KKT 条件。"""
+    if not result.feasible or result.opt_speed_kkt is None:
+        return KKTCheck(
+            feasible=False,
+            g_lower=None,
+            g_upper=None,
+            g_deadline=None,
+            mu_lower=None,
+            mu_upper=None,
+            mu_deadline=None,
+            stationarity_residual=None,
+            max_complementarity_error=None,
+            primal_min=None,
+            dual_min=None,
+            kkt_pass=False,
+            kkt_note=result.infeasible_reason,
+        )
 
-    for base in base_rows:
-        cmax_2 = safe_float(base["base_cmax_2arm"])
-        cmax_3 = safe_float(base["base_cmax_3arm"])
-        energy_2 = safe_float(base["base_energy_2arm"])
-        energy_3 = safe_float(base["base_energy_3arm"])
+    s = result.opt_speed_kkt
+    c0 = result.base_cmax
+    e0 = result.base_energy
+    d = result.deadline
 
-        if cmax_2 <= 0 or cmax_3 <= 0 or energy_2 <= 0 or energy_3 <= 0:
-            continue
+    g_lower, g_upper, g_deadline = constraint_values(
+        base_cmax=c0,
+        deadline=d,
+        speed=s,
+        speed_min=speed_min,
+        speed_max=speed_max,
+    )
 
-        for scenario in DEADLINE_SCENARIOS:
-            deadline_type = scenario["deadline_type"]
-            multiplier = safe_float(scenario["deadline_multiplier_of_2B_cmax"])
-            deadline = multiplier * cmax_2
+    f_prime = energy_derivative(e0, s, rho)
 
-            opt_2 = optimize_energy_under_deadline(
-                base_cmax=cmax_2,
-                base_energy=energy_2,
-                deadline=deadline,
-                rho=rho,
+    # g1 = s - s_min,     g1' = 1
+    # g2 = s_max - s,     g2' = -1
+    # g3 = D - C0 / s,    g3' = C0 / s^2
+    dg_lower = 1.0
+    dg_upper = -1.0
+    dg_deadline = c0 / (s * s)
+
+    mu_lower = 0.0
+    mu_upper = 0.0
+    mu_deadline = 0.0
+
+    active_lower = abs(g_lower) <= 1e-6
+    active_deadline = abs(g_deadline) <= 1e-6
+
+    # 目标函数随 s 单调递增，最优点通常被 lower_speed 或 deadline 约束顶住。
+    if active_lower:
+        mu_lower = f_prime
+    elif active_deadline:
+        mu_deadline = f_prime / dg_deadline
+
+    stationarity = (
+        f_prime
+        - mu_lower * dg_lower
+        - mu_upper * dg_upper
+        - mu_deadline * dg_deadline
+    )
+
+    comp_lower = abs(mu_lower * g_lower)
+    comp_upper = abs(mu_upper * g_upper)
+    comp_deadline = abs(mu_deadline * g_deadline)
+
+    max_comp = max(comp_lower, comp_upper, comp_deadline)
+    primal_min = min(g_lower, g_upper, g_deadline)
+    dual_min = min(mu_lower, mu_upper, mu_deadline)
+
+    scale = max(1.0, abs(f_prime))
+
+    stationarity_ok = abs(stationarity) <= KKT_TOL * scale
+    complementarity_ok = max_comp <= KKT_TOL * scale
+    primal_ok = primal_min >= -KKT_TOL
+    dual_ok = dual_min >= -KKT_TOL
+
+    kkt_pass = (
+        stationarity_ok
+        and complementarity_ok
+        and primal_ok
+        and dual_ok
+    )
+
+    note = "KKT conditions satisfied" if kkt_pass else "KKT residual exceeds tolerance"
+
+    return KKTCheck(
+        feasible=True,
+        g_lower=g_lower,
+        g_upper=g_upper,
+        g_deadline=g_deadline,
+        mu_lower=mu_lower,
+        mu_upper=mu_upper,
+        mu_deadline=mu_deadline,
+        stationarity_residual=stationarity,
+        max_complementarity_error=max_comp,
+        primal_min=primal_min,
+        dual_min=dual_min,
+        kkt_pass=kkt_pass,
+        kkt_note=note,
+    )
+
+
+# ============================================================
+# 二臂/三臂比较与切换边界
+# ============================================================
+
+def compare_2b_3b(
+    opt_2b: SpeedOptResult,
+    opt_3b: SpeedOptResult,
+) -> tuple[str, str, str, float | None]:
+    """比较同一 deadline 下 2B 和 3B 的优化后能耗。"""
+    if not opt_2b.feasible and not opt_3b.feasible:
+        return "none", "infeasible_both", "neither 2B nor 3B can meet the deadline", None
+
+    if opt_2b.feasible and not opt_3b.feasible:
+        return "2B", "recommend_2arm_only_feasible", "only 2B is feasible", None
+
+    if opt_3b.feasible and not opt_2b.feasible:
+        return "3B", "recommend_3arm_only_feasible", "only 3B is feasible", None
+
+    assert opt_2b.opt_energy_kkt is not None
+    assert opt_3b.opt_energy_kkt is not None
+
+    advantage = opt_2b.opt_energy_kkt - opt_3b.opt_energy_kkt
+
+    if advantage > EPS:
+        return (
+            "3B",
+            "recommend_3arm_lower_energy_under_deadline",
+            "3B has lower optimized energy under the same deadline",
+            advantage,
+        )
+
+    if advantage < -EPS:
+        return (
+            "2B",
+            "recommend_2arm_lower_energy_under_deadline",
+            "2B has lower optimized energy under the same deadline",
+            advantage,
+        )
+
+    return (
+        "2B",
+        "similar_prefer_2arm",
+        "optimized energies are nearly equal, prefer simpler 2B",
+        advantage,
+    )
+
+
+def advantage_at_ratio(
+    case: AveragedCase,
+    ratio: float,
+    speed_min: float,
+    speed_max: float,
+    rho: float,
+) -> float | None:
+    """计算 A(r)=E*_2B(r)-E*_3B(r)。
+
+    A(r)>0 表示 3B 优化后能耗更低；
+    A(r)<0 表示 2B 优化后能耗更低。
+    """
+    deadline = ratio * case.mean_cmax_2b
+
+    opt_2b = solve_speed_by_kkt_boundary(
+        base_cmax=case.mean_cmax_2b,
+        base_energy=case.mean_energy_2b,
+        deadline=deadline,
+        speed_min=speed_min,
+        speed_max=speed_max,
+        rho=rho,
+    )
+
+    opt_3b = solve_speed_by_kkt_boundary(
+        base_cmax=case.mean_cmax_3b,
+        base_energy=case.mean_energy_3b,
+        deadline=deadline,
+        speed_min=speed_min,
+        speed_max=speed_max,
+        rho=rho,
+    )
+
+    if not opt_2b.feasible or not opt_3b.feasible:
+        return None
+
+    if opt_2b.opt_energy_kkt is None or opt_3b.opt_energy_kkt is None:
+        return None
+
+    return opt_2b.opt_energy_kkt - opt_3b.opt_energy_kkt
+
+
+def bisection_root_for_boundary(
+    case: AveragedCase,
+    left: float,
+    right: float,
+    speed_min: float,
+    speed_max: float,
+    rho: float,
+) -> tuple[float | None, float | None, int]:
+    """用二分法求 A(r)=0 的根。"""
+    f_left = advantage_at_ratio(case, left, speed_min, speed_max, rho)
+    f_right = advantage_at_ratio(case, right, speed_min, speed_max, rho)
+
+    if f_left is None or f_right is None:
+        return None, None, 0
+
+    if abs(f_left) <= BISECTION_TOL:
+        return left, f_left, 0
+
+    if abs(f_right) <= BISECTION_TOL:
+        return right, f_right, 0
+
+    if f_left * f_right > 0:
+        return None, None, 0
+
+    a = left
+    b = right
+    fa = f_left
+
+    iterations = 0
+
+    for _ in range(BISECTION_MAX_ITER):
+        iterations += 1
+        mid = 0.5 * (a + b)
+        fm = advantage_at_ratio(case, mid, speed_min, speed_max, rho)
+
+        if fm is None:
+            return None, None, iterations
+
+        if abs(fm) <= BISECTION_TOL or abs(b - a) <= BISECTION_TOL:
+            return mid, fm, iterations
+
+        if fa * fm <= 0:
+            b = mid
+        else:
+            a = mid
+            fa = fm
+
+    mid = 0.5 * (a + b)
+    fm = advantage_at_ratio(case, mid, speed_min, speed_max, rho)
+    return mid, fm, iterations
+
+
+def find_switch_boundary(
+    case: AveragedCase,
+    deadline_ratios: list[float],
+    speed_min: float,
+    speed_max: float,
+    rho: float,
+) -> BoundaryInfo:
+    """先扫描 deadline_ratio，再用二分法寻找 2B/3B 能耗相等点。"""
+    ordered_ratios = sorted(deadline_ratios)
+
+    scanned: list[tuple[float, float]] = []
+
+    for ratio in ordered_ratios:
+        advantage = advantage_at_ratio(
+            case=case,
+            ratio=ratio,
+            speed_min=speed_min,
+            speed_max=speed_max,
+            rho=rho,
+        )
+
+        if advantage is not None:
+            scanned.append((ratio, advantage))
+
+    if not scanned:
+        return BoundaryInfo(
+            boundary_type="no_comparable_feasible_point",
+            switch_boundary_ratio_estimate=None,
+            boundary_interval_low=None,
+            boundary_interval_high=None,
+            advantage_at_boundary=None,
+            boundary_method="scan_only",
+            boundary_explanation="No deadline ratio has both 2B and 3B feasible, so no energy boundary can be computed.",
+        )
+
+    positive_ratios = [r for r, a in scanned if a > EPS]
+    negative_ratios = [r for r, a in scanned if a < -EPS]
+    zero_ratios = [r for r, a in scanned if abs(a) <= EPS]
+
+    if zero_ratios:
+        r0 = zero_ratios[0]
+        return BoundaryInfo(
+            boundary_type="exact_boundary_on_scanned_ratio",
+            switch_boundary_ratio_estimate=r0,
+            boundary_interval_low=r0,
+            boundary_interval_high=r0,
+            advantage_at_boundary=0.0,
+            boundary_method="direct_scan",
+            boundary_explanation=f"Energy equality appears directly at deadline_ratio={r0:.6f}.",
+        )
+
+    # 找相邻点的符号变化区间。
+    for i in range(len(scanned) - 1):
+        r_left, a_left = scanned[i]
+        r_right, a_right = scanned[i + 1]
+
+        if a_left * a_right < 0:
+            root, adv_root, _iters = bisection_root_for_boundary(
+                case=case,
+                left=r_left,
+                right=r_right,
                 speed_min=speed_min,
                 speed_max=speed_max,
-                barrier_initial_r=barrier_initial_r,
-                barrier_factor=barrier_factor,
-                barrier_min_r=barrier_min_r,
-                outer_tol=outer_tol,
-                inner_tol=inner_tol,
-                max_outer_iter=max_outer_iter,
-                max_inner_iter=max_inner_iter,
-            )
-
-            opt_3 = optimize_energy_under_deadline(
-                base_cmax=cmax_3,
-                base_energy=energy_3,
-                deadline=deadline,
                 rho=rho,
-                speed_min=speed_min,
-                speed_max=speed_max,
-                barrier_initial_r=barrier_initial_r,
-                barrier_factor=barrier_factor,
-                barrier_min_r=barrier_min_r,
-                outer_tol=outer_tol,
-                inner_tol=inner_tol,
-                max_outer_iter=max_outer_iter,
-                max_inner_iter=max_inner_iter,
             )
 
-            recommendation, reason = choose_mode(opt_2, opt_3)
-
-            energy_2_opt = safe_float(opt_2.get("energy"))
-            energy_3_opt = safe_float(opt_3.get("energy"))
-
-            if energy_2_opt > 0 and energy_3_opt > 0:
-                if recommendation == "recommend_2arm":
-                    selected_energy = energy_2_opt
-                    other_energy = energy_3_opt
-                elif recommendation == "recommend_3arm":
-                    selected_energy = energy_3_opt
-                    other_energy = energy_2_opt
-                else:
-                    selected_energy = min(energy_2_opt, energy_3_opt)
-                    other_energy = max(energy_2_opt, energy_3_opt)
-
-                energy_advantage = (
-                    (other_energy - selected_energy) / other_energy * 100
-                    if other_energy > 0
-                    else 0.0
+            if root is not None:
+                return BoundaryInfo(
+                    boundary_type="switching_boundary_found",
+                    switch_boundary_ratio_estimate=root,
+                    boundary_interval_low=r_left,
+                    boundary_interval_high=r_right,
+                    advantage_at_boundary=adv_root,
+                    boundary_method="scan_plus_bisection",
+                    boundary_explanation=(
+                        f"A sign change is detected between {r_left:.4f} and {r_right:.4f}; "
+                        f"bisection gives switch boundary r*≈{root:.6f}."
+                    ),
                 )
-            else:
-                energy_advantage = ""
+
+    if positive_ratios and not negative_ratios:
+        return BoundaryInfo(
+            boundary_type="all_3arm_lower_energy_in_scan",
+            switch_boundary_ratio_estimate=None,
+            boundary_interval_low=min(positive_ratios),
+            boundary_interval_high=max(positive_ratios),
+            advantage_at_boundary=None,
+            boundary_method="scan_only",
+            boundary_explanation="In all comparable scanned deadline ratios, A(r)>0, so 3B has lower optimized energy.",
+        )
+
+    if negative_ratios and not positive_ratios:
+        return BoundaryInfo(
+            boundary_type="all_2arm_lower_energy_in_scan",
+            switch_boundary_ratio_estimate=None,
+            boundary_interval_low=min(negative_ratios),
+            boundary_interval_high=max(negative_ratios),
+            advantage_at_boundary=None,
+            boundary_method="scan_only",
+            boundary_explanation="In all comparable scanned deadline ratios, A(r)<0, so 2B has lower optimized energy.",
+        )
+
+    return BoundaryInfo(
+        boundary_type="no_clear_switching_boundary",
+        switch_boundary_ratio_estimate=None,
+        boundary_interval_low=None,
+        boundary_interval_high=None,
+        advantage_at_boundary=None,
+        boundary_method="scan_only",
+        boundary_explanation="No clear switching boundary is detected in the scanned deadline range.",
+    )
+
+
+# ============================================================
+# 结果生成
+# ============================================================
+
+def build_output_rows(
+    averaged_cases: list[AveragedCase],
+    method: str,
+    deadline_ratios: list[float],
+    speed_min: float,
+    speed_max: float,
+    rho: float,
+) -> tuple[list[dict], list[dict]]:
+    """生成主结果表和 KKT 验证表。"""
+    result_rows: list[dict] = []
+    kkt_rows: list[dict] = []
+
+    for case in averaged_cases:
+        scen_type = scenario_type(case.n1, case.n2, case.n3, case.n4)
+
+        boundary = find_switch_boundary(
+            case=case,
+            deadline_ratios=deadline_ratios,
+            speed_min=speed_min,
+            speed_max=speed_max,
+            rho=rho,
+        )
+
+        for ratio in deadline_ratios:
+            deadline = ratio * case.mean_cmax_2b
+
+            opt_2b = solve_speed_by_kkt_boundary(
+                base_cmax=case.mean_cmax_2b,
+                base_energy=case.mean_energy_2b,
+                deadline=deadline,
+                speed_min=speed_min,
+                speed_max=speed_max,
+                rho=rho,
+            )
+
+            opt_3b = solve_speed_by_kkt_boundary(
+                base_cmax=case.mean_cmax_3b,
+                base_energy=case.mean_energy_3b,
+                deadline=deadline,
+                speed_min=speed_min,
+                speed_max=speed_max,
+                rho=rho,
+            )
+
+            kkt_2b = verify_kkt(opt_2b, speed_min, speed_max, rho)
+            kkt_3b = verify_kkt(opt_3b, speed_min, speed_max, rho)
+
+            recommended_mode, recommendation, reason, advantage = compare_2b_3b(
+                opt_2b=opt_2b,
+                opt_3b=opt_3b,
+            )
+
+            common = {
+                "counts_code": case.counts_code,
+                "n1": case.n1,
+                "n2": case.n2,
+                "n3": case.n3,
+                "n4": case.n4,
+                "total_tasks": case.total_tasks,
+                "scenario_type": scen_type,
+                "seed_count": case.seed_count,
+                "seeds_used": case.seeds_used,
+                "method": method,
+                "deadline_ratio": round_or_blank(ratio, 4),
+                "deadline_value": round_or_blank(deadline, 6),
+
+                "mean_cmax_2B": round_or_blank(case.mean_cmax_2b, 6),
+                "mean_energy_2B": round_or_blank(case.mean_energy_2b, 6),
+                "mean_cmax_3B": round_or_blank(case.mean_cmax_3b, 6),
+                "mean_energy_3B": round_or_blank(case.mean_energy_3b, 6),
+
+                "std_cmax_2B": round_or_blank(case.std_cmax_2b, 6),
+                "std_energy_2B": round_or_blank(case.std_energy_2b, 6),
+                "std_cmax_3B": round_or_blank(case.std_cmax_3b, 6),
+                "std_energy_3B": round_or_blank(case.std_energy_3b, 6),
+
+                "rho_speed_sensitive_energy": round_or_blank(rho, 4),
+                "speed_min": round_or_blank(speed_min, 4),
+                "speed_max": round_or_blank(speed_max, 4),
+            }
 
             result_rows.append(
                 {
-                    "deadline_type": deadline_type,
-                    "deadline_multiplier_of_2B_cmax": multiplier,
-                    "deadline_value": round2(deadline),
-                    "deadline_note": scenario["deadline_note"],
+                    **common,
 
-                    "counts_code": base["counts_code"],
-                    "scenario_type": base["scenario_type"],
-                    "total_tasks": base["total_tasks"],
-                    "n1": base["n1"],
-                    "n2": base["n2"],
-                    "n3": base["n3"],
-                    "n4": base["n4"],
+                    "feasible_2B": int(opt_2b.feasible),
+                    "required_speed_2B": round_or_blank(opt_2b.required_speed, 6),
+                    "opt_speed_2B_kkt": round_or_blank(opt_2b.opt_speed_kkt, 6),
+                    "opt_energy_2B_kkt": round_or_blank(opt_2b.opt_energy_kkt, 6),
+                    "opt_cmax_2B_after_speed": round_or_blank(opt_2b.opt_cmax_after_speed, 6),
+                    "barrier_speed_2B_0_618": round_or_blank(opt_2b.barrier_speed, 6),
+                    "barrier_energy_2B_0_618": round_or_blank(opt_2b.barrier_energy, 6),
+                    "active_constraints_2B": opt_2b.active_constraints,
+                    "infeasible_reason_2B": opt_2b.infeasible_reason,
 
-                    "base_cmax_2arm": round2(cmax_2),
-                    "base_cmax_3arm": round2(cmax_3),
-                    "base_energy_2arm": round2(energy_2),
-                    "base_energy_3arm": round2(energy_3),
+                    "feasible_3B": int(opt_3b.feasible),
+                    "required_speed_3B": round_or_blank(opt_3b.required_speed, 6),
+                    "opt_speed_3B_kkt": round_or_blank(opt_3b.opt_speed_kkt, 6),
+                    "opt_energy_3B_kkt": round_or_blank(opt_3b.opt_energy_kkt, 6),
+                    "opt_cmax_3B_after_speed": round_or_blank(opt_3b.opt_cmax_after_speed, 6),
+                    "barrier_speed_3B_0_618": round_or_blank(opt_3b.barrier_speed, 6),
+                    "barrier_energy_3B_0_618": round_or_blank(opt_3b.barrier_energy, 6),
+                    "active_constraints_3B": opt_3b.active_constraints,
+                    "infeasible_reason_3B": opt_3b.infeasible_reason,
 
-                    "status_2arm": opt_2.get("status", ""),
-                    "reason_2arm": opt_2.get("reason", ""),
-                    "required_speed_2arm": round4(opt_2.get("required_speed")),
-                    "opt_speed_2arm": round4(opt_2.get("speed")),
-                    "opt_cmax_2arm": round2(opt_2.get("cmax")),
-                    "opt_energy_2arm": round2(opt_2.get("energy")),
-
-                    "status_3arm": opt_3.get("status", ""),
-                    "reason_3arm": opt_3.get("reason", ""),
-                    "required_speed_3arm": round4(opt_3.get("required_speed")),
-                    "opt_speed_3arm": round4(opt_3.get("speed")),
-                    "opt_cmax_3arm": round2(opt_3.get("cmax")),
-                    "opt_energy_3arm": round2(opt_3.get("energy")),
-
+                    "energy_advantage_2B_minus_3B": round_or_blank(advantage, 6),
+                    "recommended_mode": recommended_mode,
                     "recommendation": recommendation,
                     "recommendation_reason": reason,
-                    "energy_advantage_selected_vs_other_percent": round2(energy_advantage),
 
-                    "solve_method": "interior_point_method + golden_section_0_618",
-                    "model": "min Energy(s), s.t. Cmax0/s <= D and speed_min <= s <= speed_max",
-                    "energy_model": "Energy(s)=Energy0*((1-rho)+rho*s^2)",
-                    "rho_dynamic_energy": rho,
-                    "speed_min": speed_min,
-                    "speed_max": speed_max,
-                    "data_source": base["data_source"],
+                    "kkt_pass_2B": int(kkt_2b.kkt_pass),
+                    "kkt_pass_3B": int(kkt_3b.kkt_pass),
+
+                    "boundary_type": boundary.boundary_type,
+                    "switch_boundary_ratio_estimate": round_or_blank(
+                        boundary.switch_boundary_ratio_estimate, 6
+                    ),
+                    "boundary_interval_low": round_or_blank(boundary.boundary_interval_low, 6),
+                    "boundary_interval_high": round_or_blank(boundary.boundary_interval_high, 6),
+                    "advantage_at_boundary": round_or_blank(boundary.advantage_at_boundary, 10),
+                    "boundary_method": boundary.boundary_method,
+                    "boundary_explanation": boundary.boundary_explanation,
+
+                    "model_formula": "min E0*((1-rho)+rho*s^2), s.t. C0/s<=D, s_min<=s<=s_max",
+                    "course_method": "seed_average + interior_barrier_method + golden_section_0_618 + KKT + bisection_boundary",
                 }
             )
 
-    return result_rows
+            for mode_name, opt, kkt in [
+                ("2B", opt_2b, kkt_2b),
+                ("3B", opt_3b, kkt_3b),
+            ]:
+                kkt_rows.append(
+                    {
+                        **common,
+                        "mode": mode_name,
+                        "base_cmax": round_or_blank(opt.base_cmax, 6),
+                        "base_energy": round_or_blank(opt.base_energy, 6),
+                        "feasible": int(kkt.feasible),
+                        "opt_speed_kkt": round_or_blank(opt.opt_speed_kkt, 6),
+                        "opt_energy_kkt": round_or_blank(opt.opt_energy_kkt, 6),
+                        "active_constraints": opt.active_constraints,
+                        "g_lower_speed": round_or_blank(kkt.g_lower, 10),
+                        "g_upper_speed": round_or_blank(kkt.g_upper, 10),
+                        "g_deadline": round_or_blank(kkt.g_deadline, 10),
+                        "mu_lower_speed": round_or_blank(kkt.mu_lower, 10),
+                        "mu_upper_speed": round_or_blank(kkt.mu_upper, 10),
+                        "mu_deadline": round_or_blank(kkt.mu_deadline, 10),
+                        "stationarity_residual": round_or_blank(kkt.stationarity_residual, 10),
+                        "max_complementarity_error": round_or_blank(kkt.max_complementarity_error, 10),
+                        "primal_min": round_or_blank(kkt.primal_min, 10),
+                        "dual_min": round_or_blank(kkt.dual_min, 10),
+                        "kkt_pass": int(kkt.kkt_pass),
+                        "kkt_note": kkt.kkt_note,
+                    }
+                )
+
+    return result_rows, kkt_rows
 
 
-def print_summary(result_rows: list[dict]) -> None:
-    """在终端打印按 deadline_type 的简要统计，不额外输出 CSV。"""
-    groups: dict[str, list[dict]] = {}
-
-    for row in result_rows:
-        groups.setdefault(row["deadline_type"], []).append(row)
-
-    print()
-    print("Deadline summary:")
-
-    for deadline_type, rows in groups.items():
-        total = len(rows)
-        rec_2 = sum(1 for r in rows if r["recommendation"] == "recommend_2arm")
-        rec_3 = sum(1 for r in rows if r["recommendation"] == "recommend_3arm")
-        no_feasible = sum(1 for r in rows if r["recommendation"] == "no_feasible_mode")
-
-        print(
-            f"  {deadline_type}: total={total}, "
-            f"recommend_2arm={rec_2}, recommend_3arm={rec_3}, "
-            f"no_feasible={no_feasible}"
-        )
-
-
-def remove_old_files(output_dir: Path) -> None:
-    """删除旧版本可能生成的不需要的文件，保证最终只留一个核心输出。"""
-    stale_files = [
-        output_dir / "speed_energy_optimization_result.csv",
-        output_dir / "speed_energy_summary_by_preference.csv",
-        output_dir / "speed_energy_model_parameters.csv",
-    ]
-
-    for path in stale_files:
-        if path.exists():
-            path.unlink()
-
+# ============================================================
+# 主函数
+# ============================================================
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Deadline-constrained nonlinear speed-energy optimization by interior point method and 0.618 search."
+        description="Merged seed-averaged nonlinear speed-energy optimization, KKT verification and 2B/3B comparison."
     )
 
     parser.add_argument(
-        "--summary-input",
-        default=str(DEFAULT_SUMMARY_INPUT),
-        help="mode_decision_summary_basic.csv",
+        "--method",
+        default=DEFAULT_METHOD,
+        help="method suffix in input CSV, e.g. optimized or optimized_heuristic",
     )
+
     parser.add_argument(
-        "--raw-input",
-        default=str(DEFAULT_RAW_INPUT),
-        help="basic_2B3B_time_energy.csv",
+        "--input",
+        default="",
+        help="input CSV path. If empty, use outputs/four_case_framework/{method}_2B3B_time_energy.csv",
     )
+
     parser.add_argument(
-        "--output-dir",
-        default=str(DEFAULT_OUTPUT_DIR),
-        help="output directory",
+        "--deadline-ratios",
+        default=",".join(str(x) for x in DEFAULT_DEADLINE_RATIOS),
+        help="comma separated deadline ratios",
     )
+
     parser.add_argument(
         "--speed-min",
         type=float,
-        default=SPEED_MIN,
+        default=DEFAULT_SPEED_MIN,
         help="minimum speed multiplier",
     )
+
     parser.add_argument(
         "--speed-max",
         type=float,
-        default=SPEED_MAX,
+        default=DEFAULT_SPEED_MAX,
         help="maximum speed multiplier",
     )
+
     parser.add_argument(
         "--rho",
         type=float,
-        default=DYNAMIC_ENERGY_RATIO,
-        help="dynamic energy ratio",
-    )
-    parser.add_argument(
-        "--barrier-initial-r",
-        type=float,
-        default=BARRIER_INITIAL_R,
-        help="initial barrier factor r",
-    )
-    parser.add_argument(
-        "--barrier-factor",
-        type=float,
-        default=BARRIER_FACTOR,
-        help="barrier reduction factor; r <- r / factor",
-    )
-    parser.add_argument(
-        "--barrier-min-r",
-        type=float,
-        default=BARRIER_MIN_R,
-        help="minimum barrier factor used as stopping threshold",
-    )
-    parser.add_argument(
-        "--outer-tol",
-        type=float,
-        default=OUTER_TOL,
-        help="outer iteration speed-change tolerance",
-    )
-    parser.add_argument(
-        "--inner-tol",
-        type=float,
-        default=INNER_TOL,
-        help="golden section interval length tolerance",
-    )
-    parser.add_argument(
-        "--max-outer-iter",
-        type=int,
-        default=MAX_OUTER_ITER,
-        help="maximum number of barrier outer iterations",
-    )
-    parser.add_argument(
-        "--max-inner-iter",
-        type=int,
-        default=MAX_INNER_ITER,
-        help="maximum number of golden section iterations per barrier subproblem",
+        default=DEFAULT_RHO,
+        help="speed-sensitive energy ratio",
     )
 
     args = parser.parse_args()
 
-    summary_path = Path(args.summary_input)
-    raw_path = Path(args.raw_input)
-    output_dir = Path(args.output_dir)
-    output_path = output_dir / OUTPUT_FILENAME
+    method = args.method.strip()
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    base_rows = load_base_rows(summary_path, raw_path)
-
-    result_rows = build_result_rows(
-        base_rows=base_rows,
-        rho=args.rho,
-        speed_min=args.speed_min,
-        speed_max=args.speed_max,
-        barrier_initial_r=args.barrier_initial_r,
-        barrier_factor=args.barrier_factor,
-        barrier_min_r=args.barrier_min_r,
-        outer_tol=args.outer_tol,
-        inner_tol=args.inner_tol,
-        max_outer_iter=args.max_outer_iter,
-        max_inner_iter=args.max_inner_iter,
+    input_path = (
+        Path(args.input)
+        if args.input.strip()
+        else OUTPUT_DIR / "four_case_framework" / f"{method}_2B3B_time_energy.csv"
     )
 
-    save_csv(result_rows, output_path)
-    remove_old_files(output_dir)
+    output_dir = OUTPUT_DIR / "nonlinear_programming" / "speed_energy_optimization"
+    result_path = output_dir / "speed_energy_optimization.csv"
+    kkt_path = output_dir / "kkt_verification.csv"
 
-    print("Deadline-constrained speed-energy nonlinear optimization finished.")
-    print(f"Summary input: {summary_path}")
-    print(f"Raw input: {raw_path}")
-    print(f"Output file: {output_path}")
-    print(f"Base rows: {len(base_rows)}")
-    print(f"Result rows: {len(result_rows)}")
-    print()
-    print("Generated only:")
-    print(f"  {OUTPUT_FILENAME}")
-    print()
-    print("Constrained nonlinear model:")
-    print("  min Energy(s)")
-    print("  s.t. Cmax0/s <= D")
-    print("       speed_min <= s <= speed_max")
-    print("  Energy(s)=Energy0*((1-rho)+rho*s^2)")
-    print()
-    print("Numerical method:")
-    print("  Interior point barrier method")
-    print("  B(s,r)=Energy(s)-r*(log(s-speed_min)+log(speed_max-s)+log(D-Cmax0/s))")
-    print("  Each barrier subproblem is solved by golden section 0.618 search")
-    print()
-    print("Deadline scenarios:")
-    for scenario in DEADLINE_SCENARIOS:
-        print(
-            f"  {scenario['deadline_type']}: "
-            f"D = {scenario['deadline_multiplier_of_2B_cmax']} * Cmax_2B"
-        )
+    if not input_path.exists():
+        print(f"Error: input file not found: {input_path}")
+        return
 
-    print_summary(result_rows)
+    raw_rows = read_csv(input_path)
+    deadline_ratios = parse_float_list(args.deadline_ratios)
 
-    if len(base_rows) > 0 and len(result_rows) == 0:
-        print()
-        print("Warning: base rows were loaded, but no result rows were generated.")
-        print("Please check whether Cmax/Energy values are positive.")
+    averaged_cases = build_averaged_cases(
+        raw_rows=raw_rows,
+        method=method,
+    )
+
+    result_rows, kkt_rows = build_output_rows(
+        averaged_cases=averaged_cases,
+        method=method,
+        deadline_ratios=deadline_ratios,
+        speed_min=args.speed_min,
+        speed_max=args.speed_max,
+        rho=args.rho,
+    )
+
+    result_fields = [
+        "counts_code",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "total_tasks",
+        "scenario_type",
+        "seed_count",
+        "seeds_used",
+        "method",
+        "deadline_ratio",
+        "deadline_value",
+
+        "mean_cmax_2B",
+        "mean_energy_2B",
+        "mean_cmax_3B",
+        "mean_energy_3B",
+
+        "std_cmax_2B",
+        "std_energy_2B",
+        "std_cmax_3B",
+        "std_energy_3B",
+
+        "rho_speed_sensitive_energy",
+        "speed_min",
+        "speed_max",
+
+        "feasible_2B",
+        "required_speed_2B",
+        "opt_speed_2B_kkt",
+        "opt_energy_2B_kkt",
+        "opt_cmax_2B_after_speed",
+        "barrier_speed_2B_0_618",
+        "barrier_energy_2B_0_618",
+        "active_constraints_2B",
+        "infeasible_reason_2B",
+
+        "feasible_3B",
+        "required_speed_3B",
+        "opt_speed_3B_kkt",
+        "opt_energy_3B_kkt",
+        "opt_cmax_3B_after_speed",
+        "barrier_speed_3B_0_618",
+        "barrier_energy_3B_0_618",
+        "active_constraints_3B",
+        "infeasible_reason_3B",
+
+        "energy_advantage_2B_minus_3B",
+        "recommended_mode",
+        "recommendation",
+        "recommendation_reason",
+
+        "kkt_pass_2B",
+        "kkt_pass_3B",
+
+        "boundary_type",
+        "switch_boundary_ratio_estimate",
+        "boundary_interval_low",
+        "boundary_interval_high",
+        "advantage_at_boundary",
+        "boundary_method",
+        "boundary_explanation",
+
+        "model_formula",
+        "course_method",
+    ]
+
+    kkt_fields = [
+        "counts_code",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "total_tasks",
+        "scenario_type",
+        "seed_count",
+        "seeds_used",
+        "method",
+        "deadline_ratio",
+        "deadline_value",
+
+        "mean_cmax_2B",
+        "mean_energy_2B",
+        "mean_cmax_3B",
+        "mean_energy_3B",
+
+        "std_cmax_2B",
+        "std_energy_2B",
+        "std_cmax_3B",
+        "std_energy_3B",
+
+        "rho_speed_sensitive_energy",
+        "speed_min",
+        "speed_max",
+
+        "mode",
+        "base_cmax",
+        "base_energy",
+        "feasible",
+        "opt_speed_kkt",
+        "opt_energy_kkt",
+        "active_constraints",
+
+        "g_lower_speed",
+        "g_upper_speed",
+        "g_deadline",
+        "mu_lower_speed",
+        "mu_upper_speed",
+        "mu_deadline",
+        "stationarity_residual",
+        "max_complementarity_error",
+        "primal_min",
+        "dual_min",
+        "kkt_pass",
+        "kkt_note",
+    ]
+
+    save_csv(result_rows, result_path, result_fields)
+    save_csv(kkt_rows, kkt_path, kkt_fields)
+
+    print("Merged nonlinear speed-energy optimization finished.")
+    print(f"Input: {input_path}")
+    print(f"Output 1: {result_path}")
+    print(f"Output 2: {kkt_path}")
+    print(f"Averaged cases: {len(averaged_cases)}")
+    print(f"Optimization/comparison rows: {len(result_rows)}")
+    print(f"KKT rows: {len(kkt_rows)}")
+    print("Main model: min E0*((1-rho)+rho*s^2), s.t. C0/s<=D, s_min<=s<=s_max")
+    print("Methods: seed averaging + interior barrier method + 0.618 golden section + KKT verification + bisection switching boundary")
 
 
 if __name__ == "__main__":

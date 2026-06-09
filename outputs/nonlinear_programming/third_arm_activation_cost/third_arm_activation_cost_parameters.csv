@@ -1,6 +1,0 @@
-﻿parameter,value,meaning
-activation_cost_K,"0,2,4,6,8,10,12,15,20,25",normalized fixed activation cost levels for enabling the third arm
-lambda_values,"0.5,1,2,3,4,5,6,8,10,15",energy penalty weights
-activation_cost_factor,"Phi(p,r)=1+0.20*r^2+0.25*I(p)+0.15*p4^2",nonlinear task-structure-dependent cost correction factor
-I(p),sum((p_i-0.25)^2)/0.75,normalized task-structure imbalance index
-decision_rule,"recommend_3arm if eta_T-lambda*eta_E-K*Phi(p,r)>0 else recommend_2arm",mode switching rule with fixed third-arm activation cost

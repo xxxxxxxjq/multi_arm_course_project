@@ -1,32 +1,48 @@
 # -*- coding: utf-8 -*-
-"""非线性规划拓展 4：随机扰动下的鲁棒模式选择优化。
+"""非线性规划 2：随机 seed 扰动下的鲁棒速度-能耗优化与二臂/三臂选择。
 
-输入优先级：
-    1. outputs/four_case_framework/basic_2B3B_time_energy.csv
-       该文件包含不同 seed / instance 下的二臂和三臂结果，适合计算波动性。
-    2. 若原始文件不存在，则退化使用：
-       outputs/mode_decision/mode_decision_summary_basic.csv
-       但这种情况下标准差只能取 0，鲁棒性分析会变弱。
+新版鲁棒性分析文件
 
-输出：
-    outputs/nonlinear_programming/robust_mode_selection/
-        robust_mode_selection_parameters.csv
-        robust_mode_selection_result.csv
-        robust_mode_selection_summary.csv
-        robust_reliable_structures.csv
+核心：
+        对同一个 counts_code 下的 seed=0,1,2 不再取平均；
+        而是选择一个统一速度倍率 s，使该速度对所有 seed 都满足截止时间；
+        并最小化所有 seed 中的最坏能耗。
 
-研究目标：
-    原模型只看平均综合收益：
-        S_lambda = eta_T - lambda * eta_E
+鲁棒速度-能耗非线性规划模型：
+    对某个模式 m in {2B, 3B}，seed 记为 j=0,1,2。
 
-    本模型进一步考虑随机任务位置或不同 seed 导致的波动：
-        S_robust = mean(S_lambda) - gamma * std(S_lambda)
+    已知：
+        C^0_{m,j}：模式 m 在 seed j 下的默认完工时间；
+        E^0_{m,j}：模式 m 在 seed j 下的默认能耗。
 
-    其中 gamma 是风险厌恶系数。
-    gamma 越大，决策越保守。
+    决策变量：
+        s_m：模式 m 采用的统一速度倍率；
+        z_m：模式 m 在所有 seed 中的最坏能耗上界。
 
-运行：
-    python scripts/nonlinear_robust_mode_selection.py
+    模型：
+        min     z_m
+
+        s.t.    E^0_{m,j} * [(1-rho) + rho*s_m^2] <= z_m,   for all seed j
+                C^0_{m,j} / s_m <= D,                       for all seed j
+                s_min <= s_m <= s_max
+
+    其中 D 是统一截止时间：
+        D = deadline_ratio * reference_cmax_2B
+
+    默认 reference_cmax_2B 取同一 counts_code 下 2B 的 seed 平均 Cmax。
+
+解释：
+    该模型回答的问题是：
+        如果任务位置存在随机扰动，而且不能针对每个 seed 单独调速，
+        那么应该给 2B 或 3B 设置怎样的统一速度，才能保证所有 seed 都按时完成，
+        并且最坏情况下的能耗最低？
+
+默认输入：
+    outputs/four_case_framework/optimized_2B3B_time_energy.csv
+
+默认输出：
+    outputs/nonlinear_programming/robust_mode_selection/robust_speed_mode_selection.csv
+
 """
 
 from __future__ import annotations
@@ -34,81 +50,151 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import sys
+from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_DIR))
 
-DEFAULT_RAW_INPUT = (
-    PROJECT_DIR
-    / "outputs"
-    / "four_case_framework"
-    / "basic_2B3B_time_energy.csv"
-)
-
-DEFAULT_SUMMARY_INPUT = (
-    PROJECT_DIR
-    / "outputs"
-    / "mode_decision"
-    / "mode_decision_summary_basic.csv"
-)
-
-DEFAULT_OUTPUT_DIR = (
-    PROJECT_DIR
-    / "outputs"
-    / "nonlinear_programming"
-    / "robust_mode_selection"
-)
-
-LAMBDA_VALUES = [0.5, 1, 2, 3, 4, 5, 6, 8, 10, 15]
-
-# gamma 越大，鲁棒性越保守
-GAMMA_VALUES = [0, 0.5, 1, 1.5, 2]
+from common.config import OUTPUT_DIR  # noqa: E402
+from common.utils import ensure_dirs  # noqa: E402
 
 
-def lambda_label(lam: float) -> str:
-    if abs(lam - int(lam)) < 1e-9:
-        return str(int(lam))
-    return str(lam).replace(".", "_")
+# ============================================================
+# 默认参数
+# ============================================================
+
+DEFAULT_METHOD = "optimized"
+
+DEFAULT_SPEED_MIN = 0.60
+DEFAULT_SPEED_MAX = 1.60
+DEFAULT_RHO = 0.35
+
+DEFAULT_DEADLINE_RATIOS = [
+    0.70,
+    0.75,
+    0.80,
+    0.85,
+    0.90,
+    0.95,
+    1.00,
+    1.05,
+    1.10,
+    1.15,
+    1.20,
+    1.25,
+    1.30,
+    1.35,
+    1.40,
+    1.50,
+]
+
+# 截止时间基准：
+# mean_2b：同一 counts_code 下 2B 的平均 Cmax，默认；
+# max_2b ：同一 counts_code 下 2B 的最大 Cmax，更保守；
+# min_2b ：同一 counts_code 下 2B 的最小 Cmax，更激进。
+DEFAULT_DEADLINE_BASE = "mean_2b"
+
+EPS = 1e-9
 
 
-def lambda_display(lam: float) -> str:
-    if abs(lam - int(lam)) < 1e-9:
-        return str(int(lam))
-    return str(lam)
+# ============================================================
+# 数据结构
+# ============================================================
+
+@dataclass
+class SeedCase:
+    """同一个 counts_code 下某个 seed 的 2B/3B 结果。"""
+
+    counts_code: str
+    n1: int
+    n2: int
+    n3: int
+    n4: int
+    total_tasks: int
+    seed: int
+
+    cmax_2b: float
+    energy_2b: float
+    cmax_3b: float
+    energy_3b: float
 
 
-def gamma_display(gamma: float) -> str:
-    if abs(gamma - int(gamma)) < 1e-9:
-        return str(int(gamma))
-    return str(gamma)
+@dataclass
+class RobustOptResult:
+    """某个模式在多个 seed 下的鲁棒速度优化结果。"""
+
+    feasible: bool
+
+    required_uniform_speed: float
+    opt_uniform_speed: float | None
+
+    worst_energy_z: float | None
+    mean_energy_after_speed: float | None
+    std_energy_after_speed: float | None
+
+    max_cmax_after_speed: float | None
+    mean_cmax_after_speed: float | None
+
+    worst_energy_seed: int | None
+    binding_time_seed: int | None
+
+    infeasible_reason: str
 
 
-def safe_float(value: Any) -> float:
+# ============================================================
+# 工具函数
+# ============================================================
+
+def safe_float(value: Any, default: float = 0.0) -> float:
     if value is None or value == "":
-        return 0.0
+        return default
     try:
         return float(value)
     except (TypeError, ValueError):
-        return 0.0
+        return default
 
 
-def safe_int(value: Any) -> int:
+def safe_int(value: Any, default: int = 0) -> int:
     if value is None or value == "":
-        return 0
+        return default
     try:
         return int(float(value))
     except (TypeError, ValueError):
-        return 0
+        return default
 
 
-def round2(value: float) -> float:
-    return round(float(value), 2)
+def round_or_blank(value: Any, digits: int = 6) -> Any:
+    if value is None:
+        return ""
+    try:
+        value_float = float(value)
+        if math.isinf(value_float):
+            return "inf"
+        if math.isnan(value_float):
+            return ""
+        return round(value_float, digits)
+    except (TypeError, ValueError):
+        return ""
 
 
-def round4(value: float) -> float:
-    return round(float(value), 4)
+def mean(values: list[float]) -> float:
+    return sum(values) / len(values) if values else 0.0
+
+
+def sample_std(values: list[float]) -> float:
+    if len(values) <= 1:
+        return 0.0
+    m = mean(values)
+    return math.sqrt(sum((x - m) ** 2 for x in values) / (len(values) - 1))
+
+
+def parse_float_list(text: str) -> list[float]:
+    return [float(x.strip()) for x in text.split(",") if x.strip()]
 
 
 def read_csv(path: Path) -> list[dict]:
@@ -116,587 +202,641 @@ def read_csv(path: Path) -> list[dict]:
         return list(csv.DictReader(f))
 
 
-def save_csv(rows: list[dict], path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    if not rows:
-        path.write_text("", encoding="utf-8-sig")
-        return
-
-    fieldnames = list(rows[0].keys())
-
+def save_csv(rows: list[dict], path: Path, fieldnames: list[str]) -> None:
+    ensure_dirs(path.parent)
     with path.open("w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 
 
-def find_column(fieldnames: list[str], candidates: list[str]) -> str | None:
-    fieldname_set = set(fieldnames)
+def counts_code_from_row(row: dict) -> str:
+    if row.get("counts_code"):
+        return str(row["counts_code"])
 
-    for c in candidates:
-        if c in fieldname_set:
-            return c
-
-    lower_map = {name.lower(): name for name in fieldnames}
-
-    for c in candidates:
-        if c.lower() in lower_map:
-            return lower_map[c.lower()]
-
-    return None
+    n1 = safe_int(row.get("n1"))
+    n2 = safe_int(row.get("n2"))
+    n3 = safe_int(row.get("n3"))
+    n4 = safe_int(row.get("n4"))
+    return f"{n1}{n2}{n3}{n4}"
 
 
-def classify_scenario(n1: int, n2: int, n3: int, n4: int) -> str:
+def get_method_columns(method: str) -> dict[str, str]:
+    return {
+        "cmax_2b": f"cmax_2B_{method}",
+        "energy_2b": f"energy_2B_{method}",
+        "cmax_3b": f"cmax_3B_{method}",
+        "energy_3b": f"energy_3B_{method}",
+    }
+
+
+def scenario_type(n1: int, n2: int, n3: int, n4: int) -> str:
+    single = n1 + n2
+    dual = n3 + n4
+
     if n1 == n2 == n3 == n4:
         return "balanced"
 
     if n4 > max(n1, n2, n3):
         return "type4_dominant"
 
-    if n1 > max(n2, n3, n4) or n2 > max(n1, n3, n4):
+    if single > dual:
         return "single_arm_dominant"
 
-    if n3 > max(n1, n2, n4):
+    if dual > single:
         return "dual_arm_dominant"
 
-    small = n1 + n2
-    large = n3 + n4
-
-    if small == large:
-        return "mixed_balanced"
-
-    if large > small:
-        return "dual_arm_dominant"
-
-    return "single_arm_dominant"
+    return "mixed_balanced"
 
 
-def mean(values: list[float]) -> float:
-    return sum(values) / len(values) if values else 0.0
+# ============================================================
+# 读取并分组 seed 数据
+# ============================================================
 
+def build_seed_cases(raw_rows: list[dict], method: str) -> list[SeedCase]:
+    """读取原始 CSV，不对 seed 取平均。"""
+    cols = get_method_columns(method)
+    cases: list[SeedCase] = []
 
-def std_sample(values: list[float]) -> float:
-    if len(values) <= 1:
-        return 0.0
+    for row in raw_rows:
+        counts_code = counts_code_from_row(row)
 
-    mu = mean(values)
-    var = sum((v - mu) ** 2 for v in values) / (len(values) - 1)
-    return math.sqrt(var)
+        n1 = safe_int(row.get("n1"))
+        n2 = safe_int(row.get("n2"))
+        n3 = safe_int(row.get("n3"))
+        n4 = safe_int(row.get("n4"))
+        total_tasks = safe_int(row.get("total_tasks"), n1 + n2 + n3 + n4)
+        seed = safe_int(row.get("seed"))
 
+        cmax_2b = safe_float(row.get(cols["cmax_2b"]))
+        energy_2b = safe_float(row.get(cols["energy_2b"]))
+        cmax_3b = safe_float(row.get(cols["cmax_3b"]))
+        energy_3b = safe_float(row.get(cols["energy_3b"]))
 
-def recommendation(score: float) -> str:
-    if score > 0:
-        return "recommend_3arm"
-    if score < 0:
-        return "recommend_2arm"
-    return "similar_prefer_2arm"
-
-
-def load_instance_rows_from_raw(raw_path: Path) -> list[dict] | None:
-    """从原始 seed 级别结果中读取二臂/三臂 Cmax 和 Energy。"""
-    if not raw_path.exists():
-        return None
-
-    rows = read_csv(raw_path)
-
-    if not rows:
-        return None
-
-    fieldnames = list(rows[0].keys())
-
-    cmax_2_col = find_column(
-        fieldnames,
-        [
-            "cmax_2B_basic",
-            "cmax_2arm",
-            "cmax_2B",
-            "Cmax_2B_basic",
-        ],
-    )
-
-    cmax_3_col = find_column(
-        fieldnames,
-        [
-            "cmax_3B_basic",
-            "cmax_3arm",
-            "cmax_3B",
-            "Cmax_3B_basic",
-        ],
-    )
-
-    energy_2_col = find_column(
-        fieldnames,
-        [
-            "energy_2B_basic",
-            "energy_2arm",
-            "energy_2B",
-            "Energy_2B_basic",
-        ],
-    )
-
-    energy_3_col = find_column(
-        fieldnames,
-        [
-            "energy_3B_basic",
-            "energy_3arm",
-            "energy_3B",
-            "Energy_3B_basic",
-        ],
-    )
-
-    status_2_col = find_column(
-        fieldnames,
-        [
-            "status_2B_basic",
-            "status_2arm",
-            "status_2B",
-        ],
-    )
-
-    status_3_col = find_column(
-        fieldnames,
-        [
-            "status_3B_basic",
-            "status_3arm",
-            "status_3B",
-        ],
-    )
-
-    required = [cmax_2_col, cmax_3_col, energy_2_col, energy_3_col]
-
-    if not all(required):
-        return None
-
-    valid_status = {"OPTIMAL", "FEASIBLE", "SUCCESS", "success", "optimal", "feasible"}
-
-    instance_rows = []
-
-    for row in rows:
-        if status_2_col and status_3_col:
-            status_2 = row.get(status_2_col, "")
-            status_3 = row.get(status_3_col, "")
-
-            if status_2 not in valid_status or status_3 not in valid_status:
-                continue
-
-        n1 = safe_int(row.get("n1", 0))
-        n2 = safe_int(row.get("n2", 0))
-        n3 = safe_int(row.get("n3", 0))
-        n4 = safe_int(row.get("n4", 0))
-
-        total_tasks = safe_int(row.get("total_tasks", n1 + n2 + n3 + n4))
-
-        cmax_2 = safe_float(row[cmax_2_col])
-        cmax_3 = safe_float(row[cmax_3_col])
-        energy_2 = safe_float(row[energy_2_col])
-        energy_3 = safe_float(row[energy_3_col])
-
-        if cmax_2 <= 0 or energy_2 <= 0:
+        if cmax_2b <= 0 or energy_2b <= 0 or cmax_3b <= 0 or energy_3b <= 0:
             continue
 
-        eta_t = (cmax_2 - cmax_3) / cmax_2 * 100.0
-        eta_e = (energy_3 - energy_2) / energy_2 * 100.0
-
-        counts_code = row.get("counts_code", f"{n1}{n2}{n3}{n4}")
-        scenario_type = row.get("scenario_type", classify_scenario(n1, n2, n3, n4))
-
-        instance_id = (
-            row.get("scenario_id")
-            or row.get("instance_id")
-            or row.get("task_id")
-            or row.get("seed")
-            or ""
+        cases.append(
+            SeedCase(
+                counts_code=counts_code,
+                n1=n1,
+                n2=n2,
+                n3=n3,
+                n4=n4,
+                total_tasks=total_tasks,
+                seed=seed,
+                cmax_2b=cmax_2b,
+                energy_2b=energy_2b,
+                cmax_3b=cmax_3b,
+                energy_3b=energy_3b,
+            )
         )
 
-        instance_rows.append(
-            {
-                "counts_code": counts_code,
-                "scenario_type": scenario_type,
-                "total_tasks": total_tasks,
-                "n1": n1,
-                "n2": n2,
-                "n3": n3,
-                "n4": n4,
-                "instance_id": instance_id,
-                "eta_T_percent": eta_t,
-                "eta_E_percent": eta_e,
-                "data_source": "basic_2B3B_time_energy.csv",
-            }
-        )
-
-    return instance_rows
+    return cases
 
 
-def get_eta_t(row: dict) -> float:
-    if "mean_eta_T_percent" in row:
-        return safe_float(row["mean_eta_T_percent"])
-    if "mean_eta_T" in row:
-        return safe_float(row["mean_eta_T"])
-    if "eta_T_percent" in row:
-        return safe_float(row["eta_T_percent"])
-    return 0.0
+def group_seed_cases(cases: list[SeedCase]) -> dict[tuple, list[SeedCase]]:
+    """按 counts_code 分组。"""
+    groups: dict[tuple, list[SeedCase]] = defaultdict(list)
 
-
-def get_eta_e(row: dict) -> float:
-    if "mean_eta_E_percent" in row:
-        return safe_float(row["mean_eta_E_percent"])
-    if "mean_eta_E" in row:
-        return safe_float(row["mean_eta_E"])
-    if "eta_E_percent" in row:
-        return safe_float(row["eta_E_percent"])
-    return 0.0
-
-
-def load_instance_rows_from_summary(summary_path: Path) -> list[dict] | None:
-    """兜底：从均值文件读取。此时没有 seed 波动，标准差会退化为 0。"""
-    if not summary_path.exists():
-        return None
-
-    rows = read_csv(summary_path)
-
-    if not rows:
-        return None
-
-    instance_rows = []
-
-    for row in rows:
-        n1 = safe_int(row.get("n1", 0))
-        n2 = safe_int(row.get("n2", 0))
-        n3 = safe_int(row.get("n3", 0))
-        n4 = safe_int(row.get("n4", 0))
-
-        total_tasks = safe_int(row.get("total_tasks", row.get("n", n1 + n2 + n3 + n4)))
-        counts_code = row.get("counts_code", f"{n1}{n2}{n3}{n4}")
-        scenario_type = row.get("scenario_type", classify_scenario(n1, n2, n3, n4))
-
-        instance_rows.append(
-            {
-                "counts_code": counts_code,
-                "scenario_type": scenario_type,
-                "total_tasks": total_tasks,
-                "n1": n1,
-                "n2": n2,
-                "n3": n3,
-                "n4": n4,
-                "instance_id": "summary_mean_only",
-                "eta_T_percent": get_eta_t(row),
-                "eta_E_percent": get_eta_e(row),
-                "data_source": "mode_decision_summary_basic.csv",
-            }
-        )
-
-    return instance_rows
-
-
-def load_instance_rows(raw_path: Path, summary_path: Path) -> list[dict]:
-    instance_rows = load_instance_rows_from_raw(raw_path)
-
-    if instance_rows:
-        return instance_rows
-
-    print("Warning: raw seed-level file not available, fallback to summary file.")
-    print("Warning: robustness standard deviation will be zero in fallback mode.")
-
-    instance_rows = load_instance_rows_from_summary(summary_path)
-
-    if instance_rows:
-        return instance_rows
-
-    raise FileNotFoundError("No usable input file found for robust optimization.")
-
-
-def group_by_structure(instance_rows: list[dict]) -> dict[tuple, list[dict]]:
-    groups: dict[tuple, list[dict]] = {}
-
-    for row in instance_rows:
+    for case in cases:
         key = (
-            row["counts_code"],
-            row["scenario_type"],
-            row["total_tasks"],
-            row["n1"],
-            row["n2"],
-            row["n3"],
-            row["n4"],
+            case.counts_code,
+            case.n1,
+            case.n2,
+            case.n3,
+            case.n4,
+            case.total_tasks,
         )
-        groups.setdefault(key, []).append(row)
+        groups[key].append(case)
 
     return groups
 
 
-def build_result_rows(instance_rows: list[dict]) -> list[dict]:
-    groups = group_by_structure(instance_rows)
+def get_deadline_reference(cases: list[SeedCase], deadline_base: str) -> float:
+    """根据指定方式计算截止时间基准。"""
+    cmax_2b_values = [c.cmax_2b for c in cases]
 
-    result_rows = []
+    if deadline_base == "mean_2b":
+        return mean(cmax_2b_values)
 
-    for key, rows in sorted(groups.items()):
-        counts_code, scenario_type, total_tasks, n1, n2, n3, n4 = key
+    if deadline_base == "max_2b":
+        return max(cmax_2b_values)
 
-        eta_t_values = [safe_float(r["eta_T_percent"]) for r in rows]
-        eta_e_values = [safe_float(r["eta_E_percent"]) for r in rows]
+    if deadline_base == "min_2b":
+        return min(cmax_2b_values)
 
-        mean_eta_t = mean(eta_t_values)
-        mean_eta_e = mean(eta_e_values)
-        std_eta_t = std_sample(eta_t_values)
-        std_eta_e = std_sample(eta_e_values)
-
-        for lam in LAMBDA_VALUES:
-            score_values = [
-                safe_float(r["eta_T_percent"]) - lam * safe_float(r["eta_E_percent"])
-                for r in rows
-            ]
-
-            mean_score = mean(score_values)
-            std_score = std_sample(score_values)
-
-            for gamma in GAMMA_VALUES:
-                robust_score = mean_score - gamma * std_score
-
-                result_rows.append(
-                    {
-                        "counts_code": counts_code,
-                        "scenario_type": scenario_type,
-                        "total_tasks": total_tasks,
-                        "n1": n1,
-                        "n2": n2,
-                        "n3": n3,
-                        "n4": n4,
-                        "lambda": lambda_display(lam),
-                        "lambda_label": lambda_label(lam),
-                        "gamma": gamma_display(gamma),
-                        "sample_count": len(rows),
-                        "mean_eta_T_percent": round2(mean_eta_t),
-                        "std_eta_T_percent": round2(std_eta_t),
-                        "mean_eta_E_percent": round2(mean_eta_e),
-                        "std_eta_E_percent": round2(std_eta_e),
-                        "mean_score": round2(mean_score),
-                        "std_score": round2(std_score),
-                        "robust_score": round2(robust_score),
-                        "robust_recommendation": recommendation(robust_score),
-                        "model_note": "robust_score = mean(S_lambda) - gamma * std(S_lambda)",
-                    }
-                )
-
-    return result_rows
+    raise ValueError(
+        f"Unsupported deadline_base: {deadline_base}. "
+        "Use mean_2b, max_2b or min_2b."
+    )
 
 
-def build_summary_rows(result_rows: list[dict]) -> list[dict]:
-    groups: dict[tuple, list[dict]] = {}
+# ============================================================
+# 鲁棒非线性优化
+# ============================================================
 
-    for row in result_rows:
-        key = (row["lambda"], row["lambda_label"], row["gamma"])
-        groups.setdefault(key, []).append(row)
+def energy_after_speed(base_energy: float, speed: float, rho: float) -> float:
+    return base_energy * ((1.0 - rho) + rho * speed * speed)
 
-    def sort_key(item):
-        lam, label, gamma = item[0]
-        return (safe_float(lam), safe_float(gamma))
 
-    summary_rows = []
+def cmax_after_speed(base_cmax: float, speed: float) -> float:
+    return base_cmax / speed
 
-    for key, rows in sorted(groups.items(), key=sort_key):
-        lam, label, gamma = key
-        case_count = len(rows)
 
-        rec_3 = sum(1 for r in rows if r["robust_recommendation"] == "recommend_3arm")
-        rec_2 = sum(1 for r in rows if r["robust_recommendation"] == "recommend_2arm")
+def solve_robust_speed_problem(
+    cmax_values: list[float],
+    energy_values: list[float],
+    seeds: list[int],
+    deadline: float,
+    speed_min: float,
+    speed_max: float,
+    rho: float,
+) -> RobustOptResult:
+    """求解鲁棒速度优化问题。
 
-        robust_scores = [safe_float(r["robust_score"]) for r in rows]
-        mean_scores = [safe_float(r["mean_score"]) for r in rows]
-        std_scores = [safe_float(r["std_score"]) for r in rows]
+    模型：
+        min z
+        s.t. E_j0*((1-rho)+rho*s^2) <= z, for all j
+             C_j0/s <= D, for all j
+             s_min <= s <= s_max
 
-        summary_rows.append(
-            {
-                "lambda": lam,
-                "lambda_label": label,
-                "gamma": gamma,
-                "case_count": case_count,
-                "recommend_3arm_count": rec_3,
-                "recommend_2arm_count": rec_2,
-                "recommend_3arm_ratio_percent": round2(rec_3 / case_count * 100),
-                "mean_of_mean_score": round2(mean(mean_scores)),
-                "mean_std_score": round2(mean(std_scores)),
-                "mean_robust_score": round2(mean(robust_scores)),
-                "min_robust_score": round2(min(robust_scores)),
-                "max_robust_score": round2(max(robust_scores)),
-                "note": "As gamma increases, the decision becomes more conservative.",
-            }
+    因为能耗关于 s 单调递增，所以最优统一速度为：
+        s* = max(s_min, max_j C_j0/D)
+
+    然后：
+        z* = max_j E_j0*((1-rho)+rho*s*^2)
+    """
+    if not cmax_values or not energy_values or len(cmax_values) != len(energy_values):
+        return RobustOptResult(
+            feasible=False,
+            required_uniform_speed=float("inf"),
+            opt_uniform_speed=None,
+            worst_energy_z=None,
+            mean_energy_after_speed=None,
+            std_energy_after_speed=None,
+            max_cmax_after_speed=None,
+            mean_cmax_after_speed=None,
+            worst_energy_seed=None,
+            binding_time_seed=None,
+            infeasible_reason="invalid empty input",
         )
 
-    return summary_rows
-
-
-def build_reliable_structure_rows(result_rows: list[dict]) -> list[dict]:
-    """汇总每个结构在不同 gamma 下可稳定承受的最大 lambda。"""
-    groups: dict[tuple, list[dict]] = {}
-
-    for row in result_rows:
-        key = (
-            row["counts_code"],
-            row["scenario_type"],
-            row["total_tasks"],
-            row["n1"],
-            row["n2"],
-            row["n3"],
-            row["n4"],
-            row["gamma"],
-        )
-        groups.setdefault(key, []).append(row)
-
-    reliable_rows = []
-
-    def sort_key(item):
-        counts_code, scenario_type, total_tasks, n1, n2, n3, n4, gamma = item[0]
-        return (safe_float(gamma), str(counts_code))
-
-    for key, rows in sorted(groups.items(), key=sort_key):
-        counts_code, scenario_type, total_tasks, n1, n2, n3, n4, gamma = key
-
-        rows_sorted = sorted(rows, key=lambda r: safe_float(r["lambda"]))
-
-        positive_lambdas = [
-            safe_float(r["lambda"])
-            for r in rows_sorted
-            if r["robust_recommendation"] == "recommend_3arm"
-        ]
-
-        if positive_lambdas:
-            max_lambda_still_3arm = max(positive_lambdas)
-        else:
-            max_lambda_still_3arm = 0.0
-
-        robust_scores = [safe_float(r["robust_score"]) for r in rows_sorted]
-
-        # 记录几个常用 lambda 下的鲁棒得分，方便报告直接引用
-        score_map = {
-            str(r["lambda"]): safe_float(r["robust_score"])
-            for r in rows_sorted
-        }
-
-        reliable_rows.append(
-            {
-                "counts_code": counts_code,
-                "scenario_type": scenario_type,
-                "total_tasks": total_tasks,
-                "n1": n1,
-                "n2": n2,
-                "n3": n3,
-                "n4": n4,
-                "gamma": gamma,
-                "recommend_3arm_lambda_count": len(positive_lambdas),
-                "max_lambda_still_recommend_3arm": lambda_display(max_lambda_still_3arm),
-                "min_robust_score_over_all_lambda": round2(min(robust_scores)),
-                "max_robust_score_over_all_lambda": round2(max(robust_scores)),
-                "robust_score_lambda_2": round2(score_map.get("2", 0.0)),
-                "robust_score_lambda_5": round2(score_map.get("5", 0.0)),
-                "robust_score_lambda_8": round2(score_map.get("8", 0.0)),
-                "structure_note": (
-                    "Larger max_lambda_still_recommend_3arm means more robust 3-arm value."
-                ),
-            }
+    if deadline <= 0:
+        return RobustOptResult(
+            feasible=False,
+            required_uniform_speed=float("inf"),
+            opt_uniform_speed=None,
+            worst_energy_z=None,
+            mean_energy_after_speed=None,
+            std_energy_after_speed=None,
+            max_cmax_after_speed=None,
+            mean_cmax_after_speed=None,
+            worst_energy_seed=None,
+            binding_time_seed=None,
+            infeasible_reason="deadline is not positive",
         )
 
-    return reliable_rows
+    required_speeds = [c / deadline for c in cmax_values]
+    required_uniform_speed = max(required_speeds)
+    binding_index = required_speeds.index(required_uniform_speed)
 
+    opt_speed = max(speed_min, required_uniform_speed)
 
-def build_parameter_rows() -> list[dict]:
-    return [
-        {
-            "parameter": "lambda_values",
-            "value": ",".join(lambda_display(lam) for lam in LAMBDA_VALUES),
-            "meaning": "energy penalty weights",
-        },
-        {
-            "parameter": "gamma_values",
-            "value": ",".join(gamma_display(g) for g in GAMMA_VALUES),
-            "meaning": "risk-aversion coefficients for robust optimization",
-        },
-        {
-            "parameter": "base_score",
-            "value": "S_lambda = eta_T - lambda * eta_E",
-            "meaning": "original mean benefit of enabling the third arm",
-        },
-        {
-            "parameter": "robust_score",
-            "value": "S_robust = mean(S_lambda) - gamma * std(S_lambda)",
-            "meaning": "lower-confidence robust benefit considering random variation",
-        },
-        {
-            "parameter": "decision_rule",
-            "value": "recommend_3arm if S_robust > 0 else recommend_2arm",
-            "meaning": "robust two-arm / three-arm mode selection rule",
-        },
+    if opt_speed > speed_max + EPS:
+        return RobustOptResult(
+            feasible=False,
+            required_uniform_speed=required_uniform_speed,
+            opt_uniform_speed=None,
+            worst_energy_z=None,
+            mean_energy_after_speed=None,
+            std_energy_after_speed=None,
+            max_cmax_after_speed=None,
+            mean_cmax_after_speed=None,
+            worst_energy_seed=None,
+            binding_time_seed=seeds[binding_index] if binding_index < len(seeds) else None,
+            infeasible_reason="required uniform speed exceeds speed_max",
+        )
+
+    opt_speed = min(opt_speed, speed_max)
+
+    energies_after = [
+        energy_after_speed(e0, opt_speed, rho)
+        for e0 in energy_values
     ]
 
+    cmax_after = [
+        cmax_after_speed(c0, opt_speed)
+        for c0 in cmax_values
+    ]
+
+    worst_energy = max(energies_after)
+    worst_index = energies_after.index(worst_energy)
+
+    return RobustOptResult(
+        feasible=True,
+        required_uniform_speed=required_uniform_speed,
+        opt_uniform_speed=opt_speed,
+        worst_energy_z=worst_energy,
+        mean_energy_after_speed=mean(energies_after),
+        std_energy_after_speed=sample_std(energies_after),
+        max_cmax_after_speed=max(cmax_after),
+        mean_cmax_after_speed=mean(cmax_after),
+        worst_energy_seed=seeds[worst_index] if worst_index < len(seeds) else None,
+        binding_time_seed=seeds[binding_index] if binding_index < len(seeds) else None,
+        infeasible_reason="",
+    )
+
+
+# ============================================================
+# 2B/3B 鲁棒推荐
+# ============================================================
+
+def compare_robust_modes(
+    robust_2b: RobustOptResult,
+    robust_3b: RobustOptResult,
+) -> tuple[str, str, str, float | None, float | None]:
+    """比较 2B 和 3B 的鲁棒最坏能耗。"""
+    if not robust_2b.feasible and not robust_3b.feasible:
+        return (
+            "none",
+            "infeasible_both",
+            "neither 2B nor 3B can satisfy the deadline for all seeds",
+            None,
+            None,
+        )
+
+    if robust_2b.feasible and not robust_3b.feasible:
+        return (
+            "2B",
+            "recommend_2arm_only_robust_feasible",
+            "only 2B is robustly feasible for all seeds",
+            None,
+            None,
+        )
+
+    if robust_3b.feasible and not robust_2b.feasible:
+        return (
+            "3B",
+            "recommend_3arm_only_robust_feasible",
+            "only 3B is robustly feasible for all seeds",
+            None,
+            None,
+        )
+
+    assert robust_2b.worst_energy_z is not None
+    assert robust_3b.worst_energy_z is not None
+
+    gap = robust_2b.worst_energy_z - robust_3b.worst_energy_z
+
+    gap_percent = (
+        gap / robust_2b.worst_energy_z * 100.0
+        if robust_2b.worst_energy_z > 0
+        else None
+    )
+
+    if gap > EPS:
+        return (
+            "3B",
+            "recommend_3arm_lower_worst_case_energy",
+            "3B has lower worst-case energy under seed perturbations",
+            gap,
+            gap_percent,
+        )
+
+    if gap < -EPS:
+        return (
+            "2B",
+            "recommend_2arm_lower_worst_case_energy",
+            "2B has lower worst-case energy under seed perturbations",
+            gap,
+            gap_percent,
+        )
+
+    return (
+        "2B",
+        "similar_prefer_2arm",
+        "worst-case energies are nearly equal, prefer simpler 2B",
+        gap,
+        gap_percent,
+    )
+
+
+# ============================================================
+# 输出构造
+# ============================================================
+
+def build_output_rows(
+    grouped_cases: dict[tuple, list[SeedCase]],
+    method: str,
+    deadline_ratios: list[float],
+    deadline_base: str,
+    speed_min: float,
+    speed_max: float,
+    rho: float,
+) -> list[dict]:
+    """生成唯一输出表。"""
+    rows: list[dict] = []
+
+    for key, cases in grouped_cases.items():
+        counts_code, n1, n2, n3, n4, total_tasks = key
+
+        cases_sorted = sorted(cases, key=lambda c: c.seed)
+        seeds = [c.seed for c in cases_sorted]
+        seeds_used = ",".join(str(s) for s in seeds)
+
+        cmax_2b_values = [c.cmax_2b for c in cases_sorted]
+        energy_2b_values = [c.energy_2b for c in cases_sorted]
+        cmax_3b_values = [c.cmax_3b for c in cases_sorted]
+        energy_3b_values = [c.energy_3b for c in cases_sorted]
+
+        deadline_reference = get_deadline_reference(cases_sorted, deadline_base)
+        scen_type = scenario_type(n1, n2, n3, n4)
+
+        for ratio in deadline_ratios:
+            deadline = ratio * deadline_reference
+
+            robust_2b = solve_robust_speed_problem(
+                cmax_values=cmax_2b_values,
+                energy_values=energy_2b_values,
+                seeds=seeds,
+                deadline=deadline,
+                speed_min=speed_min,
+                speed_max=speed_max,
+                rho=rho,
+            )
+
+            robust_3b = solve_robust_speed_problem(
+                cmax_values=cmax_3b_values,
+                energy_values=energy_3b_values,
+                seeds=seeds,
+                deadline=deadline,
+                speed_min=speed_min,
+                speed_max=speed_max,
+                rho=rho,
+            )
+
+            (
+                recommended_mode,
+                recommendation,
+                recommendation_reason,
+                worst_energy_gap_2b_minus_3b,
+                worst_energy_gap_percent,
+            ) = compare_robust_modes(robust_2b, robust_3b)
+
+            rows.append(
+                {
+                    "counts_code": counts_code,
+                    "n1": n1,
+                    "n2": n2,
+                    "n3": n3,
+                    "n4": n4,
+                    "total_tasks": total_tasks,
+                    "scenario_type": scen_type,
+                    "method": method,
+                    "seed_count": len(cases_sorted),
+                    "seeds_used": seeds_used,
+
+                    "deadline_base": deadline_base,
+                    "deadline_reference_cmax_2B": round_or_blank(deadline_reference, 6),
+                    "deadline_ratio": round_or_blank(ratio, 4),
+                    "deadline_value": round_or_blank(deadline, 6),
+
+                    "mean_cmax_2B_original": round_or_blank(mean(cmax_2b_values), 6),
+                    "std_cmax_2B_original": round_or_blank(sample_std(cmax_2b_values), 6),
+                    "max_cmax_2B_original": round_or_blank(max(cmax_2b_values), 6),
+                    "mean_energy_2B_original": round_or_blank(mean(energy_2b_values), 6),
+                    "std_energy_2B_original": round_or_blank(sample_std(energy_2b_values), 6),
+                    "max_energy_2B_original": round_or_blank(max(energy_2b_values), 6),
+
+                    "mean_cmax_3B_original": round_or_blank(mean(cmax_3b_values), 6),
+                    "std_cmax_3B_original": round_or_blank(sample_std(cmax_3b_values), 6),
+                    "max_cmax_3B_original": round_or_blank(max(cmax_3b_values), 6),
+                    "mean_energy_3B_original": round_or_blank(mean(energy_3b_values), 6),
+                    "std_energy_3B_original": round_or_blank(sample_std(energy_3b_values), 6),
+                    "max_energy_3B_original": round_or_blank(max(energy_3b_values), 6),
+
+                    "rho_speed_sensitive_energy": round_or_blank(rho, 4),
+                    "speed_min": round_or_blank(speed_min, 4),
+                    "speed_max": round_or_blank(speed_max, 4),
+
+                    "robust_feasible_2B": int(robust_2b.feasible),
+                    "required_uniform_speed_2B": round_or_blank(robust_2b.required_uniform_speed, 6),
+                    "opt_uniform_speed_2B": round_or_blank(robust_2b.opt_uniform_speed, 6),
+                    "worst_energy_z_2B": round_or_blank(robust_2b.worst_energy_z, 6),
+                    "mean_energy_after_speed_2B": round_or_blank(robust_2b.mean_energy_after_speed, 6),
+                    "std_energy_after_speed_2B": round_or_blank(robust_2b.std_energy_after_speed, 6),
+                    "max_cmax_after_speed_2B": round_or_blank(robust_2b.max_cmax_after_speed, 6),
+                    "mean_cmax_after_speed_2B": round_or_blank(robust_2b.mean_cmax_after_speed, 6),
+                    "worst_energy_seed_2B": robust_2b.worst_energy_seed if robust_2b.worst_energy_seed is not None else "",
+                    "binding_time_seed_2B": robust_2b.binding_time_seed if robust_2b.binding_time_seed is not None else "",
+                    "infeasible_reason_2B": robust_2b.infeasible_reason,
+
+                    "robust_feasible_3B": int(robust_3b.feasible),
+                    "required_uniform_speed_3B": round_or_blank(robust_3b.required_uniform_speed, 6),
+                    "opt_uniform_speed_3B": round_or_blank(robust_3b.opt_uniform_speed, 6),
+                    "worst_energy_z_3B": round_or_blank(robust_3b.worst_energy_z, 6),
+                    "mean_energy_after_speed_3B": round_or_blank(robust_3b.mean_energy_after_speed, 6),
+                    "std_energy_after_speed_3B": round_or_blank(robust_3b.std_energy_after_speed, 6),
+                    "max_cmax_after_speed_3B": round_or_blank(robust_3b.max_cmax_after_speed, 6),
+                    "mean_cmax_after_speed_3B": round_or_blank(robust_3b.mean_cmax_after_speed, 6),
+                    "worst_energy_seed_3B": robust_3b.worst_energy_seed if robust_3b.worst_energy_seed is not None else "",
+                    "binding_time_seed_3B": robust_3b.binding_time_seed if robust_3b.binding_time_seed is not None else "",
+                    "infeasible_reason_3B": robust_3b.infeasible_reason,
+
+                    "worst_energy_gap_2B_minus_3B": round_or_blank(worst_energy_gap_2b_minus_3b, 6),
+                    "worst_energy_gap_percent_vs_2B": round_or_blank(worst_energy_gap_percent, 4),
+                    "recommended_mode": recommended_mode,
+                    "recommendation": recommendation,
+                    "recommendation_reason": recommendation_reason,
+
+                    "robust_model_formula": (
+                        "min z, s.t. E_j0*((1-rho)+rho*s^2)<=z, "
+                        "C_j0/s<=D for all seeds, s_min<=s<=s_max"
+                    ),
+                    "model_meaning": (
+                        "choose one uniform speed for all seed perturbations and minimize worst-case energy"
+                    ),
+                }
+            )
+
+    return sorted(
+        rows,
+        key=lambda r: (r["counts_code"], safe_float(r["deadline_ratio"])),
+    )
+
+
+# ============================================================
+# 主函数
+# ============================================================
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Robust mode selection under random instance uncertainty."
+        description="Robust nonlinear speed-energy optimization under seed perturbations."
     )
+
     parser.add_argument(
-        "--raw-input",
-        default=str(DEFAULT_RAW_INPUT),
-        help="seed-level raw input basic_2B3B_time_energy.csv",
+        "--method",
+        default=DEFAULT_METHOD,
+        help="method suffix in input CSV, e.g. optimized or optimized_heuristic",
     )
+
     parser.add_argument(
-        "--summary-input",
-        default=str(DEFAULT_SUMMARY_INPUT),
-        help="fallback summary input mode_decision_summary_basic.csv",
+        "--input",
+        default="",
+        help="input CSV path. If empty, use outputs/four_case_framework/{method}_2B3B_time_energy.csv",
     )
+
     parser.add_argument(
-        "--output-dir",
-        default=str(DEFAULT_OUTPUT_DIR),
-        help="output directory",
+        "--deadline-ratios",
+        default=",".join(str(x) for x in DEFAULT_DEADLINE_RATIOS),
+        help="comma separated deadline ratios",
+    )
+
+    parser.add_argument(
+        "--deadline-base",
+        default=DEFAULT_DEADLINE_BASE,
+        choices=["mean_2b", "max_2b", "min_2b"],
+        help="reference Cmax used to define deadline D",
+    )
+
+    parser.add_argument(
+        "--speed-min",
+        type=float,
+        default=DEFAULT_SPEED_MIN,
+        help="minimum speed multiplier",
+    )
+
+    parser.add_argument(
+        "--speed-max",
+        type=float,
+        default=DEFAULT_SPEED_MAX,
+        help="maximum speed multiplier",
+    )
+
+    parser.add_argument(
+        "--rho",
+        type=float,
+        default=DEFAULT_RHO,
+        help="speed-sensitive energy ratio",
     )
 
     args = parser.parse_args()
 
-    raw_path = Path(args.raw_input)
-    summary_path = Path(args.summary_input)
-    output_dir = Path(args.output_dir)
+    method = args.method.strip()
 
-    instance_rows = load_instance_rows(raw_path, summary_path)
-
-    parameter_rows = build_parameter_rows()
-    result_rows = build_result_rows(instance_rows)
-    summary_rows = build_summary_rows(result_rows)
-    reliable_rows = build_reliable_structure_rows(result_rows)
-
-    save_csv(
-        parameter_rows,
-        output_dir / "robust_mode_selection_parameters.csv",
+    input_path = (
+        Path(args.input)
+        if args.input.strip()
+        else OUTPUT_DIR / "four_case_framework" / f"{method}_2B3B_time_energy.csv"
     )
 
-    save_csv(
-        result_rows,
-        output_dir / "robust_mode_selection_result.csv",
+    output_dir = OUTPUT_DIR / "nonlinear_programming" / "robust_mode_selection"
+    output_path = output_dir / "robust_speed_mode_selection.csv"
+
+    if not input_path.exists():
+        print(f"Error: input file not found: {input_path}")
+        return
+
+    raw_rows = read_csv(input_path)
+
+    seed_cases = build_seed_cases(
+        raw_rows=raw_rows,
+        method=method,
     )
 
-    save_csv(
-        summary_rows,
-        output_dir / "robust_mode_selection_summary.csv",
+    grouped_cases = group_seed_cases(seed_cases)
+
+    deadline_ratios = parse_float_list(args.deadline_ratios)
+
+    rows = build_output_rows(
+        grouped_cases=grouped_cases,
+        method=method,
+        deadline_ratios=deadline_ratios,
+        deadline_base=args.deadline_base,
+        speed_min=args.speed_min,
+        speed_max=args.speed_max,
+        rho=args.rho,
     )
 
-    save_csv(
-        reliable_rows,
-        output_dir / "robust_reliable_structures.csv",
-    )
+    fieldnames = [
+        "counts_code",
+        "n1",
+        "n2",
+        "n3",
+        "n4",
+        "total_tasks",
+        "scenario_type",
+        "method",
+        "seed_count",
+        "seeds_used",
 
-    print("Robust mode selection optimization finished.")
-    print(f"Raw input: {raw_path}")
-    print(f"Summary input: {summary_path}")
-    print(f"Output directory: {output_dir}")
-    print(f"Instance rows: {len(instance_rows)}")
-    print(f"Result rows: {len(result_rows)}")
-    print("Generated:")
-    print("  robust_mode_selection_parameters.csv")
-    print("  robust_mode_selection_result.csv")
-    print("  robust_mode_selection_summary.csv")
-    print("  robust_reliable_structures.csv")
-    print()
-    print("Model:")
-    print("  S_lambda = eta_T - lambda * eta_E")
-    print("  S_robust = mean(S_lambda) - gamma * std(S_lambda)")
-    print("  recommend_3arm if S_robust > 0 else recommend_2arm")
+        "deadline_base",
+        "deadline_reference_cmax_2B",
+        "deadline_ratio",
+        "deadline_value",
+
+        "mean_cmax_2B_original",
+        "std_cmax_2B_original",
+        "max_cmax_2B_original",
+        "mean_energy_2B_original",
+        "std_energy_2B_original",
+        "max_energy_2B_original",
+
+        "mean_cmax_3B_original",
+        "std_cmax_3B_original",
+        "max_cmax_3B_original",
+        "mean_energy_3B_original",
+        "std_energy_3B_original",
+        "max_energy_3B_original",
+
+        "rho_speed_sensitive_energy",
+        "speed_min",
+        "speed_max",
+
+        "robust_feasible_2B",
+        "required_uniform_speed_2B",
+        "opt_uniform_speed_2B",
+        "worst_energy_z_2B",
+        "mean_energy_after_speed_2B",
+        "std_energy_after_speed_2B",
+        "max_cmax_after_speed_2B",
+        "mean_cmax_after_speed_2B",
+        "worst_energy_seed_2B",
+        "binding_time_seed_2B",
+        "infeasible_reason_2B",
+
+        "robust_feasible_3B",
+        "required_uniform_speed_3B",
+        "opt_uniform_speed_3B",
+        "worst_energy_z_3B",
+        "mean_energy_after_speed_3B",
+        "std_energy_after_speed_3B",
+        "max_cmax_after_speed_3B",
+        "mean_cmax_after_speed_3B",
+        "worst_energy_seed_3B",
+        "binding_time_seed_3B",
+        "infeasible_reason_3B",
+
+        "worst_energy_gap_2B_minus_3B",
+        "worst_energy_gap_percent_vs_2B",
+        "recommended_mode",
+        "recommendation",
+        "recommendation_reason",
+
+        "robust_model_formula",
+        "model_meaning",
+    ]
+
+    save_csv(rows, output_path, fieldnames)
+
+    print("Robust nonlinear speed-energy optimization finished.")
+    print(f"Input: {input_path}")
+    print(f"Output: {output_path}")
+    print(f"Grouped counts_code cases: {len(grouped_cases)}")
+    print(f"Rows: {len(rows)}")
+    print("Model: min z, s.t. E_j0*((1-rho)+rho*s^2)<=z and C_j0/s<=D for all seeds")
+    print("Meaning: one uniform speed is selected for all seed perturbations, minimizing worst-case energy.")
 
 
 if __name__ == "__main__":

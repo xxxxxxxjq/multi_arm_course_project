@@ -61,22 +61,26 @@ DEFAULT_COUNT_CODES = [
 
 
 CSV_FIELDS = [
-    "counts_code",
     "n1",
     "n2",
     "n3",
     "n4",
     "total_tasks",
     "seed",
-
-    "status_2B_optimized_heuristic",
+    "cmax_2B_optimal",
+    "energy_2B_optimal",
     "cmax_2B_optimized_heuristic",
     "energy_2B_optimized_heuristic",
-
-    "status_3B_optimized_heuristic",
+    "cmax_gap_2B_pct",
+    "energy_gap_2B_pct",
+    "is_optimal_2B",
+    "cmax_3B_optimal",
+    "energy_3B_optimal",
     "cmax_3B_optimized_heuristic",
     "energy_3B_optimized_heuristic",
-
+    "cmax_gap_3B_pct",
+    "energy_gap_3B_pct",
+    "is_optimal_3B",
     "calc_time_optimized_heuristic_s",
 ]
 
@@ -149,6 +153,53 @@ def to_float_or_blank(value: Any) -> Any:
         return ""
 
 
+def pct_gap_or_blank(value: Any, optimal: Any) -> Any:
+    """计算相对最优值偏差百分比。"""
+    try:
+        value_f = float(value)
+        optimal_f = float(optimal)
+        if optimal_f == 0:
+            return ""
+        return round((value_f - optimal_f) / optimal_f * 100.0, 4)
+    except (TypeError, ValueError):
+        return ""
+
+
+def is_optimal_or_blank(cmax: Any, energy: Any, cmax_optimal: Any, energy_optimal: Any) -> str:
+    """判断启发式解是否达到 basic 最优目标值。"""
+    try:
+        return "yes" if (
+            abs(float(cmax) - float(cmax_optimal)) < 1e-9
+            and abs(float(energy) - float(energy_optimal)) < 1e-9
+        ) else "no"
+    except (TypeError, ValueError):
+        return ""
+
+
+def load_basic_optimal_lookup(path: Path) -> dict[tuple[int, int, int, int, int], dict[str, Any]]:
+    """读取 basic CSV，作为启发式结果的最优基准。"""
+    if not path.exists():
+        print(f"[{METHOD}] 未找到 basic 最优基准 CSV，gap 列将留空：{path}", flush=True)
+        return {}
+
+    lookup = {}
+    with path.open("r", newline="", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            try:
+                key = (
+                    int(row["n1"]),
+                    int(row["n2"]),
+                    int(row["n3"]),
+                    int(row["n4"]),
+                    int(row["seed"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+            lookup[key] = row
+    return lookup
+
+
 def save_csv(rows: list[dict], path: Path) -> None:
     """保存为 Excel 友好的 UTF-8-SIG CSV。"""
     ensure_dirs(path.parent)
@@ -209,6 +260,7 @@ def main() -> None:
     ensure_dirs(out_dir)
 
     output_path = out_dir / f"{METHOD}_2B3B_time_energy.csv"
+    optimal_lookup = load_basic_optimal_lookup(out_dir / "basic_2B3B_time_energy.csv")
 
     rows = []
     total_runs = len(count_codes) * len(seeds)
@@ -271,24 +323,40 @@ def main() -> None:
 
             t1 = time.perf_counter()
             calc_time = t1 - t0
+            optimal = optimal_lookup.get(
+                (counts[1], counts[2], counts[3], counts[4], seed),
+                {},
+            )
+            cmax_2b = result_2b.get("cmax")
+            energy_2b = result_2b.get("total_energy")
+            cmax_3b = result_3b.get("cmax")
+            energy_3b = result_3b.get("total_energy")
+            cmax_2b_opt = optimal.get("cmax_2B_basic")
+            energy_2b_opt = optimal.get("energy_2B_basic")
+            cmax_3b_opt = optimal.get("cmax_3B_basic")
+            energy_3b_opt = optimal.get("energy_3B_basic")
 
             rows.append({
-                "counts_code": counts_code,
                 "n1": counts[1],
                 "n2": counts[2],
                 "n3": counts[3],
                 "n4": counts[4],
                 "total_tasks": total_tasks,
                 "seed": seed,
-
-                "status_2B_optimized_heuristic": result_2b.get("status", ""),
-                "cmax_2B_optimized_heuristic": to_float_or_blank(result_2b.get("cmax")),
-                "energy_2B_optimized_heuristic": to_float_or_blank(result_2b.get("total_energy")),
-
-                "status_3B_optimized_heuristic": result_3b.get("status", ""),
-                "cmax_3B_optimized_heuristic": to_float_or_blank(result_3b.get("cmax")),
-                "energy_3B_optimized_heuristic": to_float_or_blank(result_3b.get("total_energy")),
-
+                "cmax_2B_optimal": to_float_or_blank(cmax_2b_opt),
+                "energy_2B_optimal": to_float_or_blank(energy_2b_opt),
+                "cmax_2B_optimized_heuristic": to_float_or_blank(cmax_2b),
+                "energy_2B_optimized_heuristic": to_float_or_blank(energy_2b),
+                "cmax_gap_2B_pct": pct_gap_or_blank(cmax_2b, cmax_2b_opt),
+                "energy_gap_2B_pct": pct_gap_or_blank(energy_2b, energy_2b_opt),
+                "is_optimal_2B": is_optimal_or_blank(cmax_2b, energy_2b, cmax_2b_opt, energy_2b_opt),
+                "cmax_3B_optimal": to_float_or_blank(cmax_3b_opt),
+                "energy_3B_optimal": to_float_or_blank(energy_3b_opt),
+                "cmax_3B_optimized_heuristic": to_float_or_blank(cmax_3b),
+                "energy_3B_optimized_heuristic": to_float_or_blank(energy_3b),
+                "cmax_gap_3B_pct": pct_gap_or_blank(cmax_3b, cmax_3b_opt),
+                "energy_gap_3B_pct": pct_gap_or_blank(energy_3b, energy_3b_opt),
+                "is_optimal_3B": is_optimal_or_blank(cmax_3b, energy_3b, cmax_3b_opt, energy_3b_opt),
                 "calc_time_optimized_heuristic_s": round(calc_time, 6),
             })
 
@@ -310,7 +378,7 @@ def main() -> None:
 
     print("\nCSV 生成完成。")
     print(f"输出文件：{output_path}")
-    print("说明：该 CSV 只包含优化方法 + 启发式算法下二臂和三臂的 Cmax、总能耗、状态和每行计算耗时，不包含分析结论。")
+    print("说明：该 CSV 只包含优化方法 + 启发式算法下二臂和三臂的 Cmax、总能耗和每行计算耗时，不包含分析结论。")
 
 
 if __name__ == "__main__":

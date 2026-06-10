@@ -1,5 +1,17 @@
 # -*- coding: utf-8 -*-
-"""基于隐枚举-分枝定界的优化方法
+"""基于启发式分支排序与强化下界的隐枚举-分枝定界求解器。
+
+本文件不调用 OR-Tools / CP-SAT，而是在与 ``solver_basic.py`` 相同的数据、
+时间、能耗和安全区口径下，显式实现小规模精确搜索。
+
+方法定位：
+- 基础方法：把整数规划/目标规划模型交给 CP-SAT 通用求解器；
+- 优化方法：用隐枚举、分枝定界和序贯目标规划思想自行求解。
+- 优化方法 + 启发式：用启发式分支排序更早找到好上界，并用强化
+  Cmax 下界提高分枝定界剪枝效率。
+
+注意：该方法仍然完整枚举任务顺序和执行模式；启发式只用于提供
+分支顺序，不用于删减搜索空间；强化下界只使用安全下界，因此不破坏最优性。
 """
 
 from __future__ import annotations
@@ -298,6 +310,87 @@ def _cmax_lower_bound(state: SearchState, tasks: list[Task], task_by_id: Dict[in
     return lower_bound
 
 
+def _remaining_resource_capacity_lower_bound(
+    state: SearchState,
+    remaining_task_ids: list[int],
+    modes_by_task: Dict[int, List[Mode]],
+    arm_count: int,
+) -> int:
+    """剩余处理时间的资源容量下界。
+
+    这里只累计所有剩余任务的最小必要处理工作量：
+      min(mode.duration * len(mode.arms))
+
+    不加入 setup，因为后续 setup 取决于未来顺序和机械臂位置；随意加入会让
+    下界变得不安全。使用 arm_available 而不是 arm_loads，是因为这里估计
+    的是时间轴上的 Cmax 下界。
+    """
+    if arm_count <= 0:
+        return state.cmax
+
+    remaining_required_work = 0
+    for task_id in remaining_task_ids:
+        remaining_required_work += min(
+            mode.duration * len(mode.arms)
+            for mode in modes_by_task[task_id]
+        )
+
+    occupied_timeline_work = sum(state.arm_available.values())
+    average_capacity_bound = (
+        occupied_timeline_work + remaining_required_work + arm_count - 1
+    ) // arm_count
+    return max(int(state.cmax), int(average_capacity_bound))
+
+
+def _forced_arm_lower_bound(
+    state: SearchState,
+    remaining_task_ids: list[int],
+    modes_by_task: Dict[int, List[Mode]],
+    arm_names: Iterable[str],
+) -> int:
+    """必须由某些机械臂承担的剩余处理时间下界。
+
+    若某个任务的所有可行模式都包含机械臂 a，则该任务至少还会占用 a
+    一段处理时间。这里同样只加入 duration，不加入 setup。
+    """
+    forced_work = {arm_name: 0 for arm_name in arm_names}
+
+    for task_id in remaining_task_ids:
+        modes = modes_by_task[task_id]
+        common_arms = set(modes[0].arms)
+        for mode in modes[1:]:
+            common_arms.intersection_update(mode.arms)
+
+        if not common_arms:
+            continue
+
+        min_duration = min(mode.duration for mode in modes)
+        for arm_name in common_arms:
+            forced_work[arm_name] += min_duration
+
+    lower_bound = state.cmax
+    for arm_name, work in forced_work.items():
+        lower_bound = max(lower_bound, state.arm_available[arm_name] + work)
+    return int(lower_bound)
+
+
+def _forced_center_lower_bound(
+    state: SearchState,
+    remaining_task_ids: list[int],
+    modes_by_task: Dict[int, List[Mode]],
+) -> int:
+    """必须占用中心区任务的串行处理时间下界。"""
+    remaining_center_work = 0
+
+    for task_id in remaining_task_ids:
+        modes = modes_by_task[task_id]
+        if all(mode.uses_center_zone for mode in modes):
+            remaining_center_work += min(mode.duration for mode in modes)
+
+    center_release = _current_center_release(state)
+    return max(int(state.cmax), int(center_release + remaining_center_work))
+
+
 def _is_complete(state: SearchState, tasks: list[Task]) -> bool:
     return len(state.scheduled) == len(tasks)
 
@@ -316,6 +409,27 @@ def _should_prune(
     cmax_lower_bound = _cmax_lower_bound(state, tasks, task_by_id, modes_by_task)
 
     remaining = [task.task_id for task in tasks if task.task_id not in state.scheduled]
+    cmax_lower_bound = max(
+        cmax_lower_bound,
+        _remaining_resource_capacity_lower_bound(
+            state,
+            remaining,
+            modes_by_task,
+            len(instance.arms),
+        ),
+        _forced_arm_lower_bound(
+            state,
+            remaining,
+            modes_by_task,
+            instance.arms.keys(),
+        ),
+        _forced_center_lower_bound(
+            state,
+            remaining,
+            modes_by_task,
+        ),
+    )
+
     remaining_min_energy = _min_remaining_mode_energy(remaining, modes_by_task)
     total_energy_lower_bound = int(
         state.motion_energy
@@ -332,10 +446,9 @@ def _branch_candidates(
     state: SearchState,
     task_by_id: Dict[int, Task],
     modes_by_task: Dict[int, List[Mode]],
+    instance: Instance,
 ) -> list[BranchCandidate]:
     """生成并排序候选分支；排序只影响上界出现速度，不裁剪解空间。"""
-    center_release = _current_center_release(state)
-    center_has_been_used = bool(state.center_intervals)
     candidates: list[BranchCandidate] = []
 
     for task in tasks:
@@ -348,21 +461,15 @@ def _branch_candidates(
             arm_ready = max(state.arm_available[arm_name] for arm_name in mode.arms)
             setup_before = int(item.get("setup_before_max", 0))
             center_wait = int(item.get("center_wait", 0))
-            starts_before_center_release = item["start"] < center_release
-            uses_idle_noncenter_slot = (
-                center_has_been_used
-                and not item["uses_center_zone"]
-                and starts_before_center_release
-            )
 
             sort_key = (
                 next_state.cmax,
                 item["end"],
-                -int(uses_idle_noncenter_slot),
                 center_wait,
-                int(center_has_been_used and item["uses_center_zone"]),
-                arm_ready,
+                _total_energy(next_state, instance),
+                _load_imbalance(next_state),
                 setup_before,
+                arm_ready,
                 item["task_id"],
                 item["mode_id"],
             )
@@ -398,7 +505,7 @@ def _search(
             result.best_score = value
         return
 
-    for candidate in _branch_candidates(tasks, state, task_by_id, modes_by_task):
+    for candidate in _branch_candidates(tasks, state, task_by_id, modes_by_task, instance):
         _search(
             candidate.next_state,
             result,
@@ -417,7 +524,7 @@ def _run_lexicographic_search(
     modes_by_task: Dict[int, List[Mode]],
 ) -> SearchResult:
     print(
-        "[optimized] start lexicographic search "
+        "[optimized_heuristic] start lexicographic search "
         f"tasks={len(tasks)}, arms={len(instance.arms)}, "
         "objective=(Cmax, total_energy, load_imbalance)",
         flush=True,
@@ -436,7 +543,7 @@ def _run_lexicographic_search(
     if result.state is None:
         raise RuntimeError("隐枚举-分枝定界未找到可行调度。")
     print(
-        "[optimized] finish lexicographic search "
+        "[optimized_heuristic] finish lexicographic search "
         f"best_score={result.best_score}, "
         f"nodes_visited={result.nodes_visited}, nodes_pruned={result.nodes_pruned}, "
         f"dominance_pruned={result.nodes_pruned_by_dominance}",
@@ -453,7 +560,7 @@ def _goal_summary(search_result: SearchResult, best_state: SearchState, instance
     best_cmax, best_energy, best_load = search_result.best_score
     return {
         "model_name": "显式隐枚举-分枝定界序贯目标规划模型",
-        "method": "优化方法：以字典序目标向量 (Cmax, 总能耗, 负载差) 一次性实现序贯目标规划",
+        "method": "优化方法 + 启发式：启发式分支排序与强化下界的隐枚举-分枝定界序贯目标规划",
         "time_goal": int(best_cmax),
         "energy_goal": int(best_energy),
         "balance_goal": 0,
@@ -470,7 +577,7 @@ def _goal_summary(search_result: SearchResult, best_state: SearchState, instance
         "nodes_pruned": int(search_result.nodes_pruned),
         "nodes_pruned_by_dominance": int(search_result.nodes_pruned_by_dominance),
         "dominance_state_count": len(search_result.dominance_table or {}),
-        "note": "本方法不调用通用求解器；动态分支顺序用于更早获得字典序上界，Cmax/能耗下界和保守状态支配剪枝保证不误删潜在最优解。",
+        "note": "本方法不调用通用求解器；动态分支顺序显式考虑Cmax、中心区等待、能耗和负载，强化Cmax/能耗下界与保守状态支配剪枝保证不误删潜在最优解。",
     }
 
 
@@ -487,7 +594,7 @@ def solve_schedule(instance: Instance, modes_by_task: Dict[int, List[Mode]]) -> 
     schedule = _sort_schedule(final_state.schedule)
     result = {
         "status": "OPTIMAL_BY_EXPLICIT_BRANCH_AND_BOUND",
-        "algorithm_name": "优化方法：自编隐枚举-分枝定界序贯目标规划",
+        "algorithm_name": "优化方法 + 启发式：启发式分支排序与强化下界的自编隐枚举-分枝定界序贯目标规划",
         "model_name": "与基础 CP-SAT 同口径的显式分枝定界多机械臂调度模型",
         "cmax": int(final_state.cmax),
         "motion_energy": int(final_state.motion_energy),

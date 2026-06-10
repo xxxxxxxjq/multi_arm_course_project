@@ -17,10 +17,12 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from itertools import combinations
 from typing import Dict, Iterable, List
 
 from common.config import (
     ALPHA_EMPTY,
+    BOX_POSITIONS,
     ENERGY_SCALE,
     SYSTEM_OVERHEAD_PER_ARM,
     TIME_SCALE,
@@ -31,6 +33,8 @@ from common.geometry import Instance, Mode, Point, Task, distance
 
 INF = 10**18
 Score = tuple[int, int, int]
+USE_SETUP_CAPACITY_LOWER_BOUND = False
+EXPENSIVE_CANDIDATE_BOUND_MIN_TASKS = 8
 
 
 @dataclass(frozen=True)
@@ -314,6 +318,7 @@ def _remaining_resource_capacity_lower_bound(
     state: SearchState,
     remaining_task_ids: list[int],
     modes_by_task: Dict[int, List[Mode]],
+    task_by_id: Dict[int, Task],
     arm_count: int,
 ) -> int:
     """剩余处理时间的资源容量下界。
@@ -329,9 +334,18 @@ def _remaining_resource_capacity_lower_bound(
         return state.cmax
 
     remaining_required_work = 0
+    reference_points = tuple(BOX_POSITIONS.values()) + tuple(state.arm_last_point.values())
+    use_setup_bound = USE_SETUP_CAPACITY_LOWER_BOUND or (
+        arm_count == 2 and len(remaining_task_ids) >= 4
+    )
     for task_id in remaining_task_ids:
         remaining_required_work += min(
             mode.duration * len(mode.arms)
+            + (
+                _min_possible_setup_work(task_by_id[task_id], mode, reference_points)
+                if use_setup_bound
+                else 0
+            )
             for mode in modes_by_task[task_id]
         )
 
@@ -340,6 +354,70 @@ def _remaining_resource_capacity_lower_bound(
         occupied_timeline_work + remaining_required_work + arm_count - 1
     ) // arm_count
     return max(int(state.cmax), int(average_capacity_bound))
+
+
+def _min_possible_setup_work(
+    task: Task,
+    mode: Mode,
+    reference_points: tuple[Point, ...],
+    arm_subset: set[str] | None = None,
+) -> int:
+    """Setup lower bound from collection boxes/current positions to task pick."""
+    used_arms = set(mode.arms)
+    if arm_subset is not None:
+        used_arms &= arm_subset
+    if not used_arms:
+        return 0
+
+    min_setup = min(
+        _setup_ticks(box_pos, task.pos)
+        for box_pos in reference_points
+    )
+    return int(min_setup * len(used_arms))
+
+
+def _subset_resource_capacity_lower_bound(
+    state: SearchState,
+    remaining_task_ids: list[int],
+    modes_by_task: Dict[int, List[Mode]],
+    task_by_id: Dict[int, Task],
+    arm_names: Iterable[str],
+) -> int:
+    """Safe capacity lower bound over every non-empty subset of arms."""
+    names = tuple(arm_names)
+    lower_bound = int(state.cmax)
+    reference_points = tuple(BOX_POSITIONS.values()) + tuple(state.arm_last_point.values())
+    use_setup_bound = USE_SETUP_CAPACITY_LOWER_BOUND or (
+        len(names) == 2 and len(remaining_task_ids) >= 4
+    )
+
+    for size in range(1, len(names) + 1):
+        for subset in combinations(names, size):
+            subset_set = set(subset)
+            required_work = 0
+
+            for task_id in remaining_task_ids:
+                task = task_by_id[task_id]
+                required_work += min(
+                    (
+                        mode.duration * len(set(mode.arms) & subset_set)
+                        + (
+                            _min_possible_setup_work(task, mode, reference_points, subset_set)
+                            if use_setup_bound
+                            else 0
+                        )
+                    )
+                    for mode in modes_by_task[task_id]
+                )
+
+            if required_work <= 0:
+                continue
+
+            occupied_work = sum(state.arm_available[arm_name] for arm_name in subset)
+            subset_bound = (occupied_work + required_work + size - 1) // size
+            lower_bound = max(lower_bound, int(subset_bound))
+
+    return lower_bound
 
 
 def _forced_arm_lower_bound(
@@ -391,6 +469,30 @@ def _forced_center_lower_bound(
     return max(int(state.cmax), int(center_release + remaining_center_work))
 
 
+def _center_capacity_lower_bound(
+    state: SearchState,
+    remaining_task_ids: list[int],
+    modes_by_task: Dict[int, List[Mode]],
+) -> int:
+    """Single-center-zone capacity lower bound."""
+    occupied_center_work = sum(
+        int(end) - int(start)
+        for start, end, _task_id in state.center_intervals
+    )
+    remaining_required_center_work = 0
+
+    for task_id in remaining_task_ids:
+        remaining_required_center_work += min(
+            mode.duration if mode.uses_center_zone else 0
+            for mode in modes_by_task[task_id]
+        )
+
+    return max(
+        int(state.cmax),
+        int(occupied_center_work + remaining_required_center_work),
+    )
+
+
 def _is_complete(state: SearchState, tasks: list[Task]) -> bool:
     return len(state.scheduled) == len(tasks)
 
@@ -415,6 +517,7 @@ def _should_prune(
             state,
             remaining,
             modes_by_task,
+            task_by_id,
             len(instance.arms),
         ),
         _forced_arm_lower_bound(
@@ -423,7 +526,19 @@ def _should_prune(
             modes_by_task,
             instance.arms.keys(),
         ),
+        _subset_resource_capacity_lower_bound(
+            state,
+            remaining,
+            modes_by_task,
+            task_by_id,
+            instance.arms.keys(),
+        ),
         _forced_center_lower_bound(
+            state,
+            remaining,
+            modes_by_task,
+        ),
+        _center_capacity_lower_bound(
             state,
             remaining,
             modes_by_task,
@@ -447,6 +562,7 @@ def _branch_candidates(
     task_by_id: Dict[int, Task],
     modes_by_task: Dict[int, List[Mode]],
     instance: Instance,
+    best_score: Score,
 ) -> list[BranchCandidate]:
     """生成并排序候选分支；排序只影响上界出现速度，不裁剪解空间。"""
     candidates: list[BranchCandidate] = []
@@ -456,6 +572,60 @@ def _branch_candidates(
             continue
         for mode in modes_by_task[task.task_id]:
             next_state = _append_mode(state, task_by_id[mode.task_id], mode)
+            if best_score[0] < INF:
+                remaining_after = [
+                    other.task_id
+                    for other in tasks
+                    if other.task_id not in next_state.scheduled
+                ]
+                if len(tasks) >= EXPENSIVE_CANDIDATE_BOUND_MIN_TASKS:
+                    cmax_lower_bound = max(
+                        int(next_state.cmax),
+                        _remaining_resource_capacity_lower_bound(
+                            next_state,
+                            remaining_after,
+                            modes_by_task,
+                            task_by_id,
+                            len(instance.arms),
+                        ),
+                        _forced_arm_lower_bound(
+                            next_state,
+                            remaining_after,
+                            modes_by_task,
+                            instance.arms.keys(),
+                        ),
+                        _subset_resource_capacity_lower_bound(
+                            next_state,
+                            remaining_after,
+                            modes_by_task,
+                            task_by_id,
+                            instance.arms.keys(),
+                        ),
+                        _forced_center_lower_bound(
+                            next_state,
+                            remaining_after,
+                            modes_by_task,
+                        ),
+                        _center_capacity_lower_bound(
+                            next_state,
+                            remaining_after,
+                            modes_by_task,
+                        ),
+                    )
+                else:
+                    cmax_lower_bound = int(next_state.cmax)
+                energy_lower_bound = int(
+                    next_state.motion_energy
+                    + _min_remaining_mode_energy(remaining_after, modes_by_task)
+                    + SYSTEM_OVERHEAD_PER_ARM * len(instance.arms)
+                )
+                lower_bound_score: Score = (
+                    int(cmax_lower_bound),
+                    int(energy_lower_bound),
+                    0,
+                )
+                if lower_bound_score >= best_score:
+                    continue
             item = next_state.schedule[-1]
 
             arm_ready = max(state.arm_available[arm_name] for arm_name in mode.arms)
@@ -505,7 +675,14 @@ def _search(
             result.best_score = value
         return
 
-    for candidate in _branch_candidates(tasks, state, task_by_id, modes_by_task, instance):
+    for candidate in _branch_candidates(
+        tasks,
+        state,
+        task_by_id,
+        modes_by_task,
+        instance,
+        result.best_score,
+    ):
         _search(
             candidate.next_state,
             result,
@@ -522,6 +699,7 @@ def _run_lexicographic_search(
     tasks: list[Task],
     task_by_id: Dict[int, Task],
     modes_by_task: Dict[int, List[Mode]],
+    initial_state: SearchState | None = None,
 ) -> SearchResult:
     print(
         "[optimized_heuristic] start lexicographic search "
@@ -529,7 +707,20 @@ def _run_lexicographic_search(
         "objective=(Cmax, total_energy, load_imbalance)",
         flush=True,
     )
-    result = SearchResult(dominance_table={})
+    if initial_state is None:
+        result = SearchResult(dominance_table={})
+    else:
+        initial_score = _score(initial_state, instance)
+        result = SearchResult(
+            state=initial_state,
+            best_score=initial_score,
+            dominance_table={},
+        )
+        print(
+            "[optimized_heuristic] initial incumbent "
+            f"score={initial_score}",
+            flush=True,
+        )
     arm_names = tuple(sorted(instance.arms))
     _search(
         _initial_state(instance),
@@ -581,12 +772,16 @@ def _goal_summary(search_result: SearchResult, best_state: SearchState, instance
     }
 
 
-def solve_schedule(instance: Instance, modes_by_task: Dict[int, List[Mode]]) -> dict:
+def solve_schedule(
+    instance: Instance,
+    modes_by_task: Dict[int, List[Mode]],
+    initial_state: SearchState | None = None,
+) -> dict:
     """用隐枚举-分枝定界求解与基础方法同口径的多机械臂调度问题。"""
     tasks = sorted(instance.tasks, key=lambda task: task.task_id)
     task_by_id = {task.task_id: task for task in tasks}
 
-    search_result = _run_lexicographic_search(instance, tasks, task_by_id, modes_by_task)
+    search_result = _run_lexicographic_search(instance, tasks, task_by_id, modes_by_task, initial_state)
     final_state = search_result.state
     if final_state is None:
         raise RuntimeError("隐枚举-分枝定界未得到最终可行调度。")

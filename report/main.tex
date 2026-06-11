@@ -1,0 +1,44 @@
+\documentclass[UTF8,a4paper,12pt]{ctexart}
+
+\usepackage{amsmath,amssymb}
+\usepackage{geometry}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{longtable}
+\usepackage{float}
+\usepackage{hyperref}
+\usepackage{array}
+
+\geometry{left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm}
+\graphicspath{{figures/}}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=black,
+    citecolor=black,
+    urlcolor=blue
+}
+
+\title{考虑多分类收集盒与双臂协同任务的多机械臂调度优化研究}
+\author{}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+\input{sections/00_abstract}
+\input{sections/01_introduction}
+\input{sections/02_problem_model}
+\input{sections/03_optimization_method}
+\input{sections/04_case_study}
+\input{sections/05_conclusion}
+\input{sections/06_contribution}
+\input{sections/appendix}
+
+\bibliographystyle{plain}
+\bibliography{refs}
+
+\end{document}

@@ -4,3 +4,12 @@ outputs/*/results/*.json
 outputs/*/results/*.csv
 outputs/*/results/*.png
 outputs/*/instances/*.json
+
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out
+*.toc

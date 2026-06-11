@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
-"""非线性规划2
+"""鲁棒非线性规划：双速度变量 + SLP 逐次线性规划 + KKT 验证。
 
-本脚本只读取已有的 2B/3B 完工时间与能耗结果，
+本脚本只读取已有的 2B/3B 完工时间与能耗结果，不重新运行主调度，
+不重新设置启动成本、固定能耗、服务时间或物块能耗参数。
+
+本版本用于替换原来的二维网格搜索鲁棒文件。它保留新版建模：
 
     s_single,m：模式 m 的单臂任务统一速度倍率
     s_dual,m  ：模式 m 的双臂协同任务统一速度倍率
@@ -29,6 +32,10 @@
         5. 用原非线性约束检查候选点，若可行且改善则接受，否则缩小步长；
         6. 迭代至步长或目标改进足够小。
 
+    本脚本不调用 scipy 或外部 LP 求解器。
+    因为 SLP 子问题只有 3 个变量 (s_single, s_dual, z)，
+    所以采用“顶点枚举法”求解线性规划子问题。
+
 输出：
     outputs/nonlinear_programming/robust_mode_selection/robust_speed_mode_selection.csv
     outputs/nonlinear_programming/robust_mode_selection/robust_kkt_verification.csv
@@ -45,6 +52,11 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+try:
+    from scipy.optimize import linprog
+except Exception:
+    linprog = None
 
 
 PROJECT_DIR = Path(__file__).resolve().parents[1]
@@ -658,9 +670,22 @@ def solve_lp_by_vertex_enumeration(
 ) -> tuple[float, float, float] | None:
     """求解 3 变量 LP：min z, s.t. A x >= b。
 
-    由于变量只有 (s_single, s_dual, z) 三个，最优解通常在多面体顶点。
-    枚举任意三个约束作为等式，检查可行性，取 z 最小者。
+    优先使用 scipy.optimize.linprog 求解线性规划子问题，速度更快；
+    如果环境中没有 scipy，则退回到顶点枚举法。
+    这里的整体算法仍然是课内的 SLP 逐次线性规划法，
+    linprog 只负责求每一步的一次线性规划子问题。
     """
+    if linprog is not None:
+        c = [0.0, 0.0, 1.0]
+        a_ub = [[-v for v in cons.a] for cons in constraints]
+        b_ub = [-cons.b for cons in constraints]
+        res = linprog(c=c, A_ub=a_ub, b_ub=b_ub, bounds=[(None, None), (None, None), (None, None)], method="highs")
+        if res.success and res.x is not None:
+            x = (float(res.x[0]), float(res.x[1]), float(res.x[2]))
+            if all(dot3(cons.a, x) >= cons.b - 1e-7 for cons in constraints):
+                return x
+
+    # scipy 不可用时，退回顶点枚举。
     best_x: tuple[float, float, float] | None = None
     best_obj = float("inf")
 
@@ -691,7 +716,6 @@ def solve_lp_by_vertex_enumeration(
             best_x = x
 
     return best_x
-
 
 def add_constraint(
     constraints: list[LinearConstraint],
@@ -1606,7 +1630,7 @@ def build_output_rows(
                         "E_k(s)=E_k0*(lambda_k/s+(1-lambda_k)*((1-rho_k)+rho_k*s^2))"
                     ),
                     "course_method": (
-                        "SLP_sequential_linear_programming + LP_vertex_enumeration + KKT_verification"
+                        "SLP_sequential_linear_programming + linear_programming_subproblem + KKT_verification"
                     ),
                     "model_meaning": (
                         "choose one pair of single/dual speeds for all seed perturbations and minimize worst-case energy"
@@ -1783,7 +1807,7 @@ def main() -> None:
     print(f"Output KKT: {kkt_path}")
     print(f"Grouped counts_code cases: {len(grouped_cases)}")
     print(f"Rows: {len(rows)}")
-    print("Method: SLP sequential linear programming + LP vertex enumeration + KKT verification")
+    print("Method: SLP sequential linear programming + linear programming subproblem + KKT verification")
     print("Model: min z with single-arm speed and dual-arm speed under U-shaped economic speed energy.")
 
 

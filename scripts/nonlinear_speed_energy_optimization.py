@@ -44,10 +44,7 @@ sys.path.insert(0, str(PROJECT_DIR))
 from common.config import OUTPUT_DIR  # noqa: E402
 from common.utils import ensure_dirs  # noqa: E402
 
-
-# ============================================================
 # 默认参数
-# ============================================================
 
 DEFAULT_METHOD = "optimized_heuristic"
 
@@ -74,10 +71,7 @@ GRID_REFINE_ROUNDS = 6
 EPS = 1e-9
 KKT_TOL = 2e-3
 
-
-# ============================================================
 # 数据结构
-# ============================================================
 
 @dataclass
 class AveragedCase:
@@ -149,10 +143,7 @@ class KKTCheck:
     kkt_pass: bool
     kkt_note: str
 
-
-# ============================================================
 # 基础工具函数
-# ============================================================
 
 def safe_float(value: Any, default: float = 0.0) -> float:
     if value is None or value == "":
@@ -246,10 +237,7 @@ def scenario_type(n1: int, n2: int, n3: int, n4: int) -> str:
         return "dual_arm_dominant"
     return "mixed_balanced"
 
-
-# ============================================================
 # 数据读取与 seed 平均
-# ============================================================
 
 def build_averaged_cases(raw_rows: list[dict], method: str) -> list[AveragedCase]:
     cols = get_method_columns(method)
@@ -299,10 +287,7 @@ def build_averaged_cases(raw_rows: list[dict], method: str) -> list[AveragedCase
         )
     return sorted(averaged_cases, key=lambda x: x.counts_code)
 
-
-# ============================================================
 # 任务类型特征拆分：只用主结果，不改主调度
-# ============================================================
 
 def build_mode_feature(
     base_cmax: float,
@@ -368,9 +353,7 @@ def build_mode_feature(
         dual_task_share=dual_share,
     )
 
-# ============================================================
 # 双变量 U 形速度-能耗模型
-# ============================================================
 
 def economic_energy_component(base_energy: float, speed: float, lambda_keep: float, rho: float) -> float:
     return base_energy * (
@@ -548,10 +531,7 @@ def solve_speed_problem(
         s1, s2, energy, cmax, active, iterations, "",
     )
 
-
-# ============================================================
 # KKT 验证
-# ============================================================
 
 def constraint_values(
     feature: ModeFeature,
@@ -683,10 +663,7 @@ def verify_kkt(
         residual[0], residual[1], max_comp, primal_min, dual_min, kkt_pass, note,
     )
 
-
-# ============================================================
 # 结果生成
-# ============================================================
 
 def compare_2b_3b(opt_2b: SpeedOptResult, opt_3b: SpeedOptResult) -> tuple[str, str, str, float | None]:
     if not opt_2b.feasible and not opt_3b.feasible:
@@ -902,10 +879,7 @@ def build_sensitivity_rows(
             })
     return rows
 
-
-# ============================================================
 # 主函数
-# ============================================================
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Two-variable U-shaped nonlinear speed-energy optimization with KKT and sensitivity analysis.")

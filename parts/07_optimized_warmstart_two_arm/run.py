@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""第五部分：启发式算法 双机械臂调度：独立运行入口。"""
+"""第七部分：运筹学 + 启发式算法 双机械臂调度：独立运行入口。"""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from common.experiment_runner import main_for_scenario  # noqa: E402
 
 if __name__ == "__main__":
     main_for_scenario(
-        scenario_id="05_optimized_heuristic_two_arm",
-        scenario_name="第五部分：启发式算法 双机械臂调度",
+        scenario_id="07_optimized_warmstart_two_arm",
+        scenario_name="第七部分：运筹学 + 启发式算法 双机械臂调度",
         arm_count=2,
-        algorithm="optimized_heuristic",
+        algorithm="optimized_warmstart",
     )

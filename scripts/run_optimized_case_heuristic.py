@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""批量生成“优化方法 + 启发式算法”下二臂/三臂的时间和能量参数 CSV。
+"""批量生成“启发式算法”下二臂/三臂的时间和能量参数 CSV。
 
 作用：
 1. 默认运行 16 种 Type 输入：
@@ -10,8 +10,8 @@
    seed = 0, 1, 2
 
 3. 每次分别运行：
-   双臂 优化方法 + 启发式算法
-   三臂 优化方法 + 启发式算法
+   双臂 启发式算法
+   三臂 启发式算法
 
 4. 只输出一个 CSV：
    outputs/four_case_framework/optimized_heuristic_2B3B_time_energy.csv

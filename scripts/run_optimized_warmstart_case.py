@@ -1,6 +1,22 @@
 # -*- coding: utf-8 -*-
-"""Batch runner for optimized exact search with a heuristic initial incumbent."""
+"""批量生成“运筹学方法 + 启发式算法”下二臂/三臂的时间和能量参数 CSV。
 
+作用：
+1. 默认运行 16 种 Type 输入：
+   1111/1112/1121/1211/2111/1122/1212/2112/
+   1221/2121/2211/1222/2122/2212/2221/2222
+
+2. 每种 Type 输入默认运行 3 次随机位置：
+   seed = 0, 1, 2
+
+3. 每次分别运行：
+   双臂 运筹学方法 + 启发式算法
+   三臂 运筹学方法 + 启发式算法
+
+4. 只输出一个 CSV：
+   outputs/four_case_framework/optimized_warmstart_2B3B_time_energy.csv
+
+"""
 from __future__ import annotations
 
 import argparse

@@ -15,8 +15,6 @@
 
 4. 只输出一个 CSV：
    outputs/four_case_framework/optimized_2B3B_time_energy.csv
-
-5. CSV 只记录时间和能量参数，不做任何分析、不下结论。
 """
 
 from __future__ import annotations

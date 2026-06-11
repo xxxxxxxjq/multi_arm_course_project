@@ -44,10 +44,7 @@ sys.path.insert(0, str(PROJECT_DIR))
 from common.config import OUTPUT_DIR  # noqa: E402
 from common.utils import ensure_dirs  # noqa: E402
 
-
-# ============================================================
 # 默认参数
-# ============================================================
 
 DEFAULT_METHOD = "optimized_heuristic"
 DEFAULT_SPEED_MIN = 0.60
@@ -71,10 +68,7 @@ GRID_REFINE_POINTS = 41
 GRID_REFINE_ROUNDS = 6
 EPS = 1e-9
 
-
-# ============================================================
 # 数据结构
-# ============================================================
 
 @dataclass
 class SeedCase:
@@ -120,10 +114,7 @@ class RobustOptResult:
     infeasible_reason: str
     search_iterations: int
 
-
-# ============================================================
 # 工具函数
-# ============================================================
 
 def safe_float(value: Any, default: float = 0.0) -> float:
     if value is None or value == "":
@@ -217,10 +208,7 @@ def scenario_type(n1: int, n2: int, n3: int, n4: int) -> str:
         return "dual_arm_dominant"
     return "mixed_balanced"
 
-
-# ============================================================
 # 读取并分组 seed 数据
-# ============================================================
 
 def build_seed_cases(raw_rows: list[dict], method: str) -> list[SeedCase]:
     cols = get_method_columns(method)
@@ -261,10 +249,7 @@ def get_deadline_reference(cases: list[SeedCase], deadline_base: str) -> float:
         return min(cmax_2b_values)
     raise ValueError("Unsupported deadline_base")
 
-
-# ============================================================
 # 任务特征拆分与 U 形能耗函数
-# ============================================================
 
 def build_mode_feature(base_cmax: float, base_energy: float, n1: int, n2: int, n3: int, n4: int, mode: str) -> ModeFeature:
     """从已有 seed 运行结果构造鲁棒速度层特征。
@@ -348,10 +333,7 @@ def linspace(left: float, right: float, n: int) -> list[float]:
     step = (right - left) / (n - 1)
     return [left + i * step for i in range(n)]
 
-
-# ============================================================
 # 鲁棒非线性优化
-# ============================================================
 
 def robust_objective_and_stats(
     features: list[ModeFeature],
@@ -456,10 +438,7 @@ def solve_robust_speed_problem(
     mean_e, std_e, max_c, mean_c, worst_seed, binding_seed = best_stats
     return RobustOptResult(True, required_single, required_dual, best_s1, best_s2, best_worst, mean_e, std_e, max_c, mean_c, worst_seed, binding_seed, "", iterations)
 
-
-# ============================================================
 # 2B/3B 鲁棒推荐
-# ============================================================
 
 def compare_robust_modes(robust_2b: RobustOptResult, robust_3b: RobustOptResult) -> tuple[str, str, str, float | None, float | None]:
     if not robust_2b.feasible and not robust_3b.feasible:
@@ -477,10 +456,7 @@ def compare_robust_modes(robust_2b: RobustOptResult, robust_3b: RobustOptResult)
         return "2B", "recommend_2arm_lower_worst_case_energy", "2B has lower worst-case energy under seed perturbations", gap, gap_percent
     return "2B", "similar_prefer_2arm", "worst-case energies are nearly equal, prefer simpler 2B", gap, gap_percent
 
-
-# ============================================================
 # 输出构造
-# ============================================================
 
 def build_output_rows(
     grouped_cases: dict[tuple, list[SeedCase]],
@@ -593,10 +569,7 @@ def build_output_rows(
 
     return sorted(rows, key=lambda r: (r["counts_code"], safe_float(r["deadline_ratio"])))
 
-
-# ============================================================
 # 主函数
-# ============================================================
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Robust two-variable U-shaped nonlinear speed-energy optimization under seed perturbations.")

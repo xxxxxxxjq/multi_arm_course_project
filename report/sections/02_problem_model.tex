@@ -28,13 +28,13 @@
     \centering
     \begin{minipage}{0.48\textwidth}
         \centering
-        \includegraphics[width=\linewidth]{workspace_two_arm_example.png}
+        \includegraphics[width=\linewidth]{workspace_two_arm_example.jpg}
         \par\small (a) 两臂系统示意
     \end{minipage}
     \hfill
     \begin{minipage}{0.48\textwidth}
         \centering
-        \includegraphics[width=\linewidth]{workspace_three_arm_example.png}
+        \includegraphics[width=\linewidth]{workspace_three_arm_example.jpg}
         \par\small (b) 三臂系统示意
     \end{minipage}
     \caption{多机械臂分类搬运任务的工作空间示意}
@@ -264,29 +264,24 @@ $v_0$ 为空载移动速度。若 $v$ 是机械臂 $a$ 的第一个任务，则
 
 \subsection{目标规划模型}
 
-本问题同时关注完成效率、运行能耗和机械臂利用均衡。由于这三个目标的重要性不同，本文采用序贯目标规划思想，而不是简单加权求和。令 $G_1,G_2,G_3$ 分别为最大完工时间、总能耗和负载均衡的理想目标值，引入正负偏差变量：
+本问题同时关注完成效率、运行能耗和机械臂利用均衡。由于三个目标的重要性不同，本文不采用简单加权求和，而采用序贯多目标优化思想：先优化最高优先级目标，再在保持高优先级目标最优的前提下优化下一目标。
+
+第一阶段以最大完工时间最小为目标：
 \[
-    C_{\max}+d_1^- - d_1^+=G_1,
+    P_1:\quad \min C_{\max}.
 \]
+记第一阶段得到的最优值为 $C_{\max}^{\star}$。第二阶段在保持最优完工时间不变的条件下，最小化系统总能耗：
 \[
-    E_{\mathrm{tot}}+d_2^- - d_2^+=G_2,
+    P_2:\quad \min E_{\mathrm{tot}},
+    \quad \text{s.t. } C_{\max}=C_{\max}^{\star}.
 \]
+记第二阶段得到的最优能耗为 $E_{\mathrm{tot}}^{\star}$。第三阶段在保持前两级目标最优的条件下，最小化机械臂负载不均衡度：
 \[
-    B+d_3^- - d_3^+=G_3.
+    P_3:\quad \min B,
+    \quad \text{s.t. } C_{\max}=C_{\max}^{\star},\ 
+    E_{\mathrm{tot}}=E_{\mathrm{tot}}^{\star}.
 \]
 
-本文按如下优先级进行优化：
-\[
-    P_1:\min \left(Md_1^+ + C_{\max}\right),
-\]
-\[
-    P_2:\min \left(Md_2^+ + E_{\mathrm{tot}}\right)
-    \quad \text{在保持 }P_1\text{ 最优结果不变的条件下},
-\]
-\[
-    P_3:\min \left(Md_3^+ + B\right)
-    \quad \text{在保持前两级主要目标不变的条件下}.
-\]
-其中 $M$ 为足够大的优先级系数。该目标结构表示：首先保证整体任务尽快完成，其次在不牺牲时间目标的前提下降低能耗，最后在前两者基础上改善机械臂负载均衡。
+该目标结构表示：首先保证整体任务尽快完成，其次在不牺牲时间目标的前提下降低能耗，最后在前两者基础上改善机械臂负载均衡。这样处理避免了人为选择加权系数，也使求解结果的优先级解释更加明确。
 
 综上，本文的核心模型可以理解为一个带有可选执行模式、并行机器资源约束、序列相关 setup、中心安全区互斥和多目标优先级的调度优化模型。后续第 3 章将在该模型基础上分别设计基础求解方法、自编优化算法以及速度--能耗层的非线性扩展。

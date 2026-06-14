@@ -45,14 +45,14 @@ instance_*.json   该次随机生成的任务实例
 
 | 部分 | 方法 | 机械臂数量 | 测试 counts |
 |---|---|---:|---|
-| 01_basic_two_arm | 基础方法 | 2 | 1111 |
-| 02_basic_three_arm | 基础方法 | 3 | 2111 |
-| 03_optimized_two_arm | 运筹学优化方法 | 2 | 1121 |
-| 04_optimized_three_arm | 运筹学优化方法 | 3 | 2211 |
+| 01_basic_two_arm | 求解器CP-SAT | 2 | 1111 |
+| 02_basic_three_arm | 求解器CP-SAT | 3 | 2111 |
+| 03_optimized_two_arm | 融合剪枝的隐枚举法 | 2 | 1121 |
+| 04_optimized_three_arm | 融合剪枝的隐枚举法 | 3 | 2211 |
 | 05_optimized_heuristic_two_arm | 启发式算法 | 2 | 1221 |
 | 06_optimized_heuristic_three_arm | 启发式算法 | 3 | 1122 |
-| 07_optimized_warmstart_two_arm | 运筹学方法 + 启发式初始解 | 2 | 2221 |
-| 08_optimized_warmstart_three_arm | 运筹学方法 + 启发式初始解 | 3 | 1222 |
+| 07_optimized_warmstart_two_arm | 热启动后的隐枚举法 | 2 | 2221 |
+| 08_optimized_warmstart_three_arm | 热启动后的隐枚举法 | 3 | 1222 |
 
 重新运行某一个部分时，使用：
 

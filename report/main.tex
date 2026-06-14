@@ -1,5 +1,6 @@
 \documentclass[UTF8,a4paper,12pt]{ctexart}
 
+% ===================== 基本宏包 =====================
 \usepackage{amsmath,amssymb}
 \usepackage{geometry}
 \usepackage{graphicx}
@@ -10,38 +11,147 @@
 \usepackage{array}
 \usepackage{xcolor}
 \usepackage{tikz}
+\usepackage{setspace}
+\usepackage{fontspec}
+\usepackage{fancyhdr}
+\usepackage{enumitem}
+\usepackage{caption}
+\usepackage{indentfirst}
 \usetikzlibrary{arrows.meta,positioning}
 
+% ===================== 页面设置 =====================
 \geometry{left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm}
 \graphicspath{{figures/}}
 
-\hypersetup{
-    colorlinks=true,
-    linkcolor=black,
-    citecolor=black,
-    urlcolor=blue
+% ===================== 字体设置 =====================
+% 编译方式必须使用 XeLaTeX
+% 正文中文：宋体；英文和数字：Times New Roman
+\setmainfont{Times New Roman}
+\setCJKmainfont[AutoFakeBold=3]{SimSun}
+
+% ===================== 正文格式 =====================
+% 小四宋体，1.5 倍行距，首行缩进 2 字符
+\AtBeginDocument{\zihao{-4}\songti}
+\onehalfspacing
+\setlength{\parindent}{2em}
+
+% ===================== 标题格式设置 =====================
+% 一级、二级、三级标题：小四，黑体，相当于中文加粗效果
+\ctexset{
+	section = {
+		format = {\zihao{-4}\heiti},
+		name = {},
+		number = \arabic{section},
+		aftername = \quad,
+		beforeskip = 1.5ex,
+		afterskip = 1.0ex
+	},
+	subsection = {
+		format = {\zihao{-4}\heiti},
+		name = {},
+		number = \thesection.\arabic{subsection},
+		aftername = \quad,
+		beforeskip = 1.2ex,
+		afterskip = 0.8ex
+	},
+	subsubsection = {
+		format = {\zihao{-4}\heiti},
+		name = {},
+		number = \thesubsection.\arabic{subsubsection},
+		aftername = \quad,
+		beforeskip = 1.0ex,
+		afterskip = 0.6ex
+	}
 }
 
-\title{考虑多分类收集盒与双臂协同任务的多机械臂调度优化研究}
-\author{}
-\date{\today}
+% ===================== 图表标题设置 =====================
+% 图表 caption：小五，加粗，居中
+\DeclareCaptionFont{xiaowu}{\zihao{-5}\heiti}
+\captionsetup{
+	font=xiaowu,
+	labelfont=xiaowu,
+	labelsep=space,
+	justification=centering
+}
 
+% ===================== 页眉页脚设置 =====================
+% 页码放在每页正下方中间
+\pagestyle{fancy}
+\fancyhf{}
+\fancyfoot[C]{\thepage}
+\renewcommand{\headrulewidth}{0pt}
+\renewcommand{\footrulewidth}{0pt}
+
+\fancypagestyle{plain}{
+	\fancyhf{}
+	\fancyfoot[C]{\thepage}
+	\renewcommand{\headrulewidth}{0pt}
+	\renewcommand{\footrulewidth}{0pt}
+}
+
+% ===================== 超链接设置 =====================
+\hypersetup{
+	colorlinks=true,
+	linkcolor=black,
+	citecolor=black,
+	urlcolor=blue
+}
+
+% ===================== 文档开始 =====================
 \begin{document}
+	
+	% ===================== 封面 =====================
+	\begin{titlepage}
+		\thispagestyle{empty}
+		\centering
+		
+		\begin{figure}[h!]
+			\includegraphics[width=\textwidth]{pic.png}
+		\end{figure}
+		
+		\vspace*{1cm}
+		
+		{\zihao{1}\heiti \textbf{多机械臂搬运调度与模式选择}\par}
+		
+		\vspace{0.5cm}
+		
+		{\zihao{3}\heiti 运筹学课程大作业\par}
+		
+		\vspace{1.5cm}
+		
+		\renewcommand{\arraystretch}{1.8}
+		{\zihao{-4}\songti
+			\begin{tabular}{>{\heiti}r p{8cm}}
+				团队成员： & \underline{\makebox[8cm][c]{修嘉卿3240104703}} \\[0.4cm]
+					& \underline{\makebox[8cm][c]{
+							傅安澜3240104374}} \\[0.4cm]
+						& \underline{\makebox[8cm][c]{王沐灵3240101575}} \\[0.4cm]
+				专业：     & \underline{\makebox[8cm][c]{自动化（电气学院）}} \\[0.4cm]
+				指导老师： & \underline{\makebox[8cm][c]{何衍}} \\[0.4cm]
+				日期：     & \underline{\makebox[8cm][c]{\today}} \\
+			\end{tabular}
+		}
+		
+		\vfill
+	\end{titlepage}
+	
+	% ===================== 目录 =====================
+	\pagenumbering{arabic}
+	\tableofcontents
+	\newpage
+	
+	% ===================== 正文 =====================
+	\input{sections/00_abstract}
+	\input{sections/01_introduction}
+	\input{sections/02_problem_model}
+	\input{sections/03_optimization_method}
+	\input{sections/04_case_study}
+		\input{sections/05_数据分析}
+	\input{sections/06_conclusion}
+		\input{sections/06.5_附件清单}
+	\input{sections/07_参考文献}
+	\input{sections/08_分工}
+	
 
-\maketitle
-\tableofcontents
-\newpage
-
-\input{sections/00_abstract}
-\input{sections/01_introduction}
-\input{sections/02_problem_model}
-\input{sections/03_optimization_method}
-\input{sections/04_case_study}
-\input{sections/05_conclusion}
-\input{sections/06_contribution}
-\input{sections/appendix}
-
-\bibliographystyle{plain}
-\bibliography{refs}
-
+	
 \end{document}

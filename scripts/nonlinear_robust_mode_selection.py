@@ -261,6 +261,100 @@ def save_csv(rows: list[dict], path: Path, fieldnames: list[str]) -> None:
         writer.writerows(rows)
 
 
+# ============================================================
+# CSV 输出字段筛选
+# 只控制写出的 CSV 列，不参与任何建模、求解、KKT 计算。
+# ============================================================
+
+ROBUST_RESULT_FIELDNAMES = [
+    "counts_code",
+    "n1",
+    "n2",
+    "n3",
+    "n4",
+    "total_tasks",
+    "scenario_type",
+    "method",
+    "seed_count",
+    "deadline_base",
+    "deadline_reference_cmax_2B",
+    "deadline_ratio",
+    "deadline_value",
+    "lambda_single",
+    "lambda_dual",
+    "rho_single",
+    "rho_dual",
+    "speed_min",
+    "speed_max",
+
+    "mean_cmax_2B_original",
+    "max_cmax_2B_original",
+    "mean_energy_2B_original",
+    "max_energy_2B_original",
+    "robust_feasible_2B",
+    "opt_speed_single_2B",
+    "opt_speed_dual_2B",
+    "worst_energy_z_2B",
+    "mean_energy_after_speed_2B",
+    "max_cmax_after_speed_2B",
+    "worst_energy_seed_2B",
+    "binding_time_seed_2B",
+    "kkt_pass_2B",
+    "infeasible_reason_2B",
+
+    "mean_cmax_3B_original",
+    "max_cmax_3B_original",
+    "mean_energy_3B_original",
+    "max_energy_3B_original",
+    "robust_feasible_3B",
+    "opt_speed_single_3B",
+    "opt_speed_dual_3B",
+    "worst_energy_z_3B",
+    "mean_energy_after_speed_3B",
+    "max_cmax_after_speed_3B",
+    "worst_energy_seed_3B",
+    "binding_time_seed_3B",
+    "kkt_pass_3B",
+    "infeasible_reason_3B",
+
+    "worst_energy_gap_2B_minus_3B",
+    "worst_energy_gap_percent_vs_2B",
+    "recommended_mode",
+    "recommendation",
+    "recommendation_reason",
+]
+
+ROBUST_KKT_FIELDNAMES = [
+    "counts_code",
+    "deadline_base",
+    "deadline_ratio",
+    "deadline_value",
+    "mode",
+
+    "feasible",
+    "opt_speed_single",
+    "opt_speed_dual",
+    "worst_energy_z",
+    "max_cmax_after_speed",
+    "worst_energy_seed",
+    "binding_time_seed",
+
+    "primal_min",
+    "dual_min",
+    "stationarity_s_single",
+    "stationarity_s_dual",
+    "stationarity_z",
+    "stationarity_norm",
+    "max_complementarity_error",
+    "active_constraints",
+    "active_time_seeds",
+    "active_energy_seeds",
+    "selected_multipliers",
+    "kkt_pass",
+    "kkt_note",
+]
+
+
 def counts_code_from_row(row: dict) -> str:
     if row.get("counts_code"):
         return str(row["counts_code"])
@@ -1796,10 +1890,10 @@ def main() -> None:
         print("Warning: no rows generated. Please check input CSV columns and method suffix.")
         return
 
-    save_csv(rows, output_path, list(rows[0].keys()))
+    save_csv(rows, output_path, ROBUST_RESULT_FIELDNAMES)
 
     if kkt_rows:
-        save_csv(kkt_rows, kkt_path, list(kkt_rows[0].keys()))
+        save_csv(kkt_rows, kkt_path, ROBUST_KKT_FIELDNAMES)
 
     print("Robust SLP nonlinear speed-energy optimization finished.")
     print(f"Input: {input_path}")

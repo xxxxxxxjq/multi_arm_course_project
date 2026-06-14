@@ -252,6 +252,100 @@ def save_csv(rows: list[dict], path: Path, fieldnames: list[str]) -> None:
         writer.writerows(rows)
 
 
+# ============================================================
+# CSV 输出字段筛选
+# 只控制写出的 CSV 列，不参与任何建模、求解、KKT 计算。
+# ============================================================
+
+SPEED_RESULT_FIELDNAMES = [
+    "sensitivity_case",
+    "counts_code",
+    "n1",
+    "n2",
+    "n3",
+    "n4",
+    "total_tasks",
+    "scenario_type",
+    "seed_count",
+    "method",
+    "deadline_ratio",
+    "deadline_value",
+    "lambda_single",
+    "lambda_dual",
+    "rho_single",
+    "rho_dual",
+    "speed_min",
+    "speed_max",
+
+    "mean_cmax_2B_original",
+    "mean_energy_2B_original",
+    "feasible_2B",
+    "opt_speed_single_2B",
+    "opt_speed_dual_2B",
+    "opt_energy_2B",
+    "opt_cmax_2B",
+    "active_constraints_2B",
+    "kkt_pass_2B",
+    "infeasible_reason_2B",
+
+    "mean_cmax_3B_original",
+    "mean_energy_3B_original",
+    "feasible_3B",
+    "opt_speed_single_3B",
+    "opt_speed_dual_3B",
+    "opt_energy_3B",
+    "opt_cmax_3B",
+    "active_constraints_3B",
+    "kkt_pass_3B",
+    "infeasible_reason_3B",
+
+    "energy_advantage_2B_minus_3B",
+    "recommended_mode",
+    "recommendation",
+    "recommendation_reason",
+]
+
+SPEED_KKT_FIELDNAMES = [
+    "sensitivity_case",
+    "counts_code",
+    "deadline_ratio",
+    "deadline_value",
+    "lambda_single",
+    "lambda_dual",
+    "rho_single",
+    "rho_dual",
+    "speed_min",
+    "speed_max",
+    "mode",
+
+    "feasible",
+    "opt_speed_single",
+    "opt_speed_dual",
+    "opt_energy",
+    "opt_cmax",
+    "active_constraints",
+
+    "g_single_lower",
+    "g_single_upper",
+    "g_dual_lower",
+    "g_dual_upper",
+    "g_deadline",
+    "mu_single_lower",
+    "mu_single_upper",
+    "mu_dual_lower",
+    "mu_dual_upper",
+    "mu_deadline",
+    "stationarity_single_residual",
+    "stationarity_dual_residual",
+    "stationarity_norm",
+    "max_complementarity_error",
+    "primal_min",
+    "dual_min",
+    "kkt_pass",
+    "kkt_note",
+]
+
+
 def counts_code_from_row(row: dict) -> str:
     if row.get("counts_code"):
         return str(row["counts_code"])
@@ -1634,13 +1728,10 @@ def main() -> None:
         print("Warning: no result rows generated. Please check input CSV columns and method suffix.")
         return
 
-    result_fieldnames = list(result_rows[0].keys())
-    kkt_fieldnames = list(kkt_rows[0].keys()) if kkt_rows else []
-
-    save_csv(result_rows, result_path, result_fieldnames)
+    save_csv(result_rows, result_path, SPEED_RESULT_FIELDNAMES)
 
     if kkt_rows:
-        save_csv(kkt_rows, kkt_path, kkt_fieldnames)
+        save_csv(kkt_rows, kkt_path, SPEED_KKT_FIELDNAMES)
 
     print("Two-variable nonlinear speed-energy optimization completed.")
     print(f"Input: {input_path}")

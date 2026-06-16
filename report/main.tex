@@ -1,4 +1,4 @@
-\documentclass[UTF8,a4paper,12pt]{ctexart}
+\documentclass[UTF8,a4paper,12pt,fontset=fandol]{ctexart}
 
 % ===================== 基本宏包 =====================
 \usepackage{amsmath,amssymb}
@@ -17,6 +17,7 @@
 \usepackage{enumitem}
 \usepackage{caption}
 \usepackage{indentfirst}
+\usepackage{url}
 \usetikzlibrary{arrows.meta,positioning}
 
 % ===================== 页面设置 =====================
@@ -27,7 +28,7 @@
 % 编译方式必须使用 XeLaTeX
 % 正文中文：宋体；英文和数字：Times New Roman
 \setmainfont{Times New Roman}
-\setCJKmainfont[AutoFakeBold=3]{SimSun}
+% \setCJKmainfont[AutoFakeBold=3]{SimSun}
 
 % ===================== 正文格式 =====================
 % 小四宋体，1.5 倍行距，首行缩进 2 字符
@@ -146,9 +147,9 @@
 	\input{sections/02_problem_model}
 	\input{sections/03_optimization_method}
 	\input{sections/04_case_study}
-		\input{sections/05_数据分析}
+	\input{sections/05_数据分析}
 	\input{sections/06_conclusion}
-		\input{sections/06.5_附件清单}
+	\input{sections/06.5_附件清单}
 	\input{sections/07_参考文献}
 	\input{sections/08_分工}
 	

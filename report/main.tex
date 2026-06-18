@@ -1,3 +1,5 @@
+% !TeX program = xelatex
+% !TeX encoding = UTF-8
 \documentclass[UTF8,a4paper,12pt,fontset=fandol]{ctexart}
 
 % ===================== 基本宏包 =====================
@@ -23,12 +25,13 @@
 % ===================== 页面设置 =====================
 \geometry{left=2.5cm,right=2.5cm,top=2.5cm,bottom=2.5cm}
 \graphicspath{{figures/}}
+\definecolor{headingblue}{RGB}{25,68,112}
 
 % ===================== 字体设置 =====================
 % 编译方式必须使用 XeLaTeX
 % 正文中文：宋体；英文和数字：Times New Roman
 \setmainfont{Times New Roman}
-% \setCJKmainfont[AutoFakeBold=3]{SimSun}
+\setCJKmainfont[AutoFakeBold=3]{SimSun}
 
 % ===================== 正文格式 =====================
 % 小四宋体，1.5 倍行距，首行缩进 2 字符
@@ -37,31 +40,31 @@
 \setlength{\parindent}{2em}
 
 % ===================== 标题格式设置 =====================
-% 一级、二级、三级标题：小四，黑体，相当于中文加粗效果
+% 通过字号、颜色和段前段后距建立清晰的三级标题层级
 \ctexset{
 	section = {
-		format = {\zihao{-4}\heiti},
+		format = {\zihao{3}\songti\bfseries},
 		name = {},
 		number = \arabic{section},
 		aftername = \quad,
-		beforeskip = 1.5ex,
-		afterskip = 1.0ex
+		beforeskip = 2.4ex,
+		afterskip = 1.4ex
 	},
 	subsection = {
-		format = {\zihao{-4}\heiti},
+		format = {\zihao{4}\songti\bfseries},
 		name = {},
 		number = \thesection.\arabic{subsection},
 		aftername = \quad,
-		beforeskip = 1.2ex,
-		afterskip = 0.8ex
+		beforeskip = 2.0ex,
+		afterskip = 1.0ex
 	},
 	subsubsection = {
-		format = {\zihao{-4}\heiti},
+		format = {\zihao{-4}\songti\bfseries},
 		name = {},
 		number = \thesubsection.\arabic{subsubsection},
 		aftername = \quad,
-		beforeskip = 1.0ex,
-		afterskip = 0.6ex
+		beforeskip = 1.5ex,
+		afterskip = 0.8ex
 	}
 }
 
@@ -106,34 +109,33 @@
 		\thispagestyle{empty}
 		\centering
 		
-		\begin{figure}[h!]
-			\includegraphics[width=\textwidth]{pic.png}
-		\end{figure}
+		\vspace*{0.7cm}
+		\makebox[\textwidth][c]{\includegraphics[width=1.25\textwidth]{pic.png}}\par
 		
-		\vspace*{1cm}
+		\vspace{0.30cm}
 		
 		{\zihao{1}\heiti \textbf{多机械臂搬运调度与模式选择}\par}
 		
-		\vspace{0.5cm}
+		\vspace{0.6cm}
 		
-		{\zihao{3}\heiti 运筹学课程大作业\par}
+		{\zihao{3}\heiti \textbf{运筹学课程大作业}\par}
 		
-		\vspace{1.5cm}
+		\vfill
 		
-		\renewcommand{\arraystretch}{1.8}
-		{\zihao{-4}\songti
-			\begin{tabular}{>{\heiti}r p{8cm}}
-				团队成员： & \underline{\makebox[8cm][c]{修嘉卿3240104703}} \\[0.4cm]
-					& \underline{\makebox[8cm][c]{
-							傅安澜3240104374}} \\[0.4cm]
-						& \underline{\makebox[8cm][c]{王沐灵3240101575}} \\[0.4cm]
-				专业：     & \underline{\makebox[8cm][c]{自动化（电气学院）}} \\[0.4cm]
-				指导老师： & \underline{\makebox[8cm][c]{何衍}} \\[0.4cm]
-				日期：     & \underline{\makebox[8cm][c]{\today}} \\
+		\renewcommand{\arraystretch}{1.6}
+		{\zihao{4}\songti
+			\begin{tabular}{>{\heiti}r p{8.5cm}}
+				团队成员： & \underline{\makebox[8.5cm][c]{修嘉卿3240104703}} \\[0.3cm]
+					& \underline{\makebox[8.5cm][c]{
+							傅安澜3240104374}} \\[0.3cm]
+						& \underline{\makebox[8.5cm][c]{王沐灵3240101575}} \\[0.3cm]
+				专业：     & \underline{\makebox[8.5cm][c]{自动化（电气学院）}} \\[0.3cm]
+				指导老师： & \underline{\makebox[8.5cm][c]{何衍}} \\[0.3cm]
+				日期：     & \underline{\makebox[8.5cm][c]{\today}} \\
 			\end{tabular}
 		}
 		
-		\vfill
+		\vspace*{0.8cm}
 	\end{titlepage}
 	
 	% ===================== 目录 =====================
